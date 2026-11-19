@@ -529,10 +529,15 @@ local main = new("Frame", {
     BackgroundColor3 = T.bg, BorderSizePixel = 0, ClipsDescendants = true,
 }, gui)
 corner(main, 12); stroke(main)
-
+local mainGradient = new("UIGradient", {
+    Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 0, 0)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 255, 255)),
+    }),
+    Rotation = 90,
+}, main)
 local top = new("Frame", { Size = UDim2.new(1, 0, 0, 40), BackgroundTransparency = 1 }, main)
 label(top, "MouSey Hub", UDim2.new(0, 110, 1, 0), UDim2.fromOffset(16, 0), T.text, Enum.Font.GothamBold)
-label(top, "@" .. LP.Name, UDim2.new(0, 200, 1, 0), UDim2.fromOffset(122, 0), T.dim, Enum.Font.Gotham)
 local gameTitle = label(top, "🐶Throw Food For Animals🌭", UDim2.new(1, 0, 1, 0), UDim2.fromOffset(40, 0), T.text, Enum.Font.GothamBold)
 gameTitle.TextXAlignment = Enum.TextXAlignment.Center
 gameTitle.ZIndex = 2
@@ -553,44 +558,60 @@ local minBtn = iconBtn(top, "–", -66)
 local closeBtn = iconBtn(top, "×", -34)
 
 local body = new("Frame", { Size = UDim2.new(1, 0, 1, -41), Position = UDim2.fromOffset(0, 41), BackgroundTransparency = 1 }, main)
-local side = new("Frame", { Size = UDim2.new(0, 52, 1, 0), BackgroundTransparency = 1 }, body)
-local content = new("Frame", { Size = UDim2.new(1, -52, 1, 0), Position = UDim2.fromOffset(52, 0), BackgroundTransparency = 1 }, body)
-new("Frame", { Size = UDim2.new(0, 1, 1, 0), Position = UDim2.fromOffset(52, 0), BackgroundColor3 = T.line, BorderSizePixel = 0 }, body)
+local side = new("Frame", { Size = UDim2.new(0, 92, 1, 0), BackgroundTransparency = true and 1 or 1 }, body)
+local content = new("Frame", { Size = UDim2.new(1, -92, 1, 0), Position = UDim2.fromOffset(92, 0), BackgroundTransparency = 1 }, body)
+new("Frame", { Size = UDim2.new(0, 1, 1, 0), Position = UDim2.fromOffset(92, 0), BackgroundColor3 = T.line, BorderSizePixel = 0 }, body)
 
 -- ===== tabs =====
 local tabs, pages = {}, {}
 local function selectTab(name)
     for n, pg in pairs(pages) do pg.Visible = (n == name) end
     for n, b in pairs(tabs) do
-        tween(b, {
-            BackgroundColor3 = (n == name) and T.panel or T.bg,
-            TextColor3 = (n == name) and T.text or T.dim,
-        }, 0.15)
+        local active = (n == name)
+        tween(b, { BackgroundColor3 = active and T.panel or T.bg }, 0.15)
+        for _, ch in ipairs(b:GetChildren()) do
+            if ch:IsA("TextLabel") then
+                tween(ch, { TextColor3 = active and T.text or T.dim }, 0.15)
+            end
+        end
     end
 end
 
 for i, name in ipairs(TabOrder) do
     local b = new("TextButton", {
-        Size = UDim2.fromOffset(36, 36), Position = UDim2.fromOffset(8, 12 + (i - 1) * 42),
+        Size = UDim2.new(1, -10, 0, 36), Position = UDim2.fromOffset(5, 70 + (i - 1) * 42),
         BackgroundColor3 = T.bg, BorderSizePixel = 0, AutoButtonColor = false,
-        Text = Icons[name], TextColor3 = T.dim, TextSize = 16, Font = Enum.Font.GothamBold,
+        Text = "", LayoutOrder = i,
     }, side)
     corner(b, 9)
+
+    local icon = label(b, Icons[name], UDim2.fromOffset(20, 36), UDim2.fromOffset(6, 0), T.dim, Enum.Font.GothamBold)
+    icon.TextSize = 15
+    icon.TextXAlignment = Enum.TextXAlignment.Center
+
+    local txt = label(b, name, UDim2.new(1, -30, 1, 0), UDim2.fromOffset(28, 0), T.dim, Enum.Font.GothamMedium)
+    txt.TextSize = 11
+
     tabs[name] = b
     pages[name] = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false }, content)
     b.MouseButton1Click:Connect(function() selectTab(name) end)
 end
 
+-- ===== โปรไฟล์ (ด้านบนแถบแท็บ เหนือ Farm) =====
 local pfp = new("ImageLabel", {
-    Size = UDim2.fromOffset(34, 34), Position = UDim2.new(0, 9, 1, -43),
+    Size = UDim2.fromOffset(40, 40), Position = UDim2.new(0.5, -20, 0, 6),
     BackgroundColor3 = T.panel, BorderSizePixel = 0,
 }, side)
-corner(pfp, 17); stroke(pfp)
+corner(pfp, 20); stroke(pfp)
 task.spawn(function()
     local ok, img = pcall(Players.GetUserThumbnailAsync, Players, LP.UserId,
         Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100)
     if ok then pfp.Image = img end
 end)
+
+local pfpName = label(side, LP.Name, UDim2.new(1, 0, 0, 12), UDim2.fromOffset(0, 50), T.dim, Enum.Font.Gotham, Enum.TextXAlignment.Center)
+pfpName.TextSize = 10
+pfpName.TextTruncate = Enum.TextTruncate.AtEnd
 
 -- ===== components =====
 local function column(parent, x)
@@ -1037,7 +1058,7 @@ local float = new("TextButton", {
     BackgroundColor3 = T.bg, BorderSizePixel = 0, AutoButtonColor = false,
     Text = "M", TextColor3 = T.text, TextSize = 18, Font = Enum.Font.GothamBold, ZIndex = 50,
 }, gui)
-corner(float, 22); stroke(float)
+corner(float, 10); stroke(float)
 
 local fDrag, fStart, fPos, fMoved = false, nil, nil, false
 float.InputBegan:Connect(function(i)
@@ -1122,7 +1143,7 @@ task.spawn(function()
     end
 end)
 
--- ===== intro : คำว่า MouSey กลางจอ แล้วเปิดเมนู =====
+-- ===== intro : คำว่า MouSey กลางจอ มีแสงเรือง แล้วเปิดเมนู =====
 local function playIntro()
     local introLabel = new("TextLabel", {
         Size = UDim2.fromOffset(600, 120), Position = UDim2.fromScale(0.5, 0.5),
@@ -1132,15 +1153,40 @@ local function playIntro()
     }, gui)
     local scale = new("UIScale", { Scale = 0.8 }, introLabel)
 
+    -- ชั้นแสงเรือง: stroke หนาสีขาว โปร่งใสไว้ แล้วกระพริบเบาๆ
+    local glow = new("UIStroke", {
+        Color = Color3.fromRGB(255, 255, 255), Thickness = 6,
+        Transparency = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+    }, introLabel)
+    local glow2 = new("UIStroke", {
+        Color = Color3.fromRGB(180, 220, 255), Thickness = 14,
+        Transparency = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+    }, introLabel)
+
     main.Visible = false
     float.Visible = false
 
+    -- เข้า: ตัวอักษรค่อยๆ ปรากฏ + แสงสว่างขึ้น
     tween(introLabel, { TextTransparency = 0 }, 1)
     tween(scale, { Scale = 1 }, 0.5)
-    task.wait(2)
-    tween(introLabel, { TextTransparency = 1 }, 1)
-    tween(scale, { Scale = 1.1 }, 0.4)
-    task.wait(0.45)
+    tween(glow, { Transparency = 0.2 }, 0.8)
+    tween(glow2, { Transparency = 0.6 }, 0.8)
+
+    task.wait(0.8)
+    -- เต้นแสงเบาๆ ระหว่างค้างไว้
+    for _ = 1, 3 do
+        tween(glow2, { Transparency = 0.8 }, 0.35)
+        task.wait(0.35)
+        tween(glow2, { Transparency = 0.5 }, 0.35)
+        task.wait(0.35)
+    end
+
+    -- ออก: แสงและตัวอักษรจางหาย
+    tween(glow, { Transparency = 1 }, 0.5)
+    tween(glow2, { Transparency = 1 }, 0.5)
+    tween(introLabel, { TextTransparency = 1 }, 0.8)
+    tween(scale, { Scale = 1.1 }, 0.6)
+    task.wait(0.6)
     introLabel:Destroy()
 
     main.Visible = true
@@ -1149,7 +1195,6 @@ local function playIntro()
     mainScale.Scale = 0.9
     tween(mainScale, { Scale = 1 }, 0.35)
 end
-
 -- ===== เริ่มต้น =====
 selectTab("Farm")
 syncKnown()
