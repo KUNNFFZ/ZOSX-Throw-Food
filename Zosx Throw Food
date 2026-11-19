@@ -1,15 +1,19 @@
 -- 2K Hub | Throw Food For Animals : FARM(Throw perfect + Cycle โยน/เทรน) + Auto Equip Best + TRAIN(x2) + SHOP + SELL + MISC
+-- UI : MouSey Hub (ดำ-ขาว, glow ที่สวิตช์, ลูกลอย, resize, keybind, intro, notify)
 if getgenv().TwoK then pcall(getgenv().TwoK.Stop) end
 
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local HJS = game:GetService("HttpService")
 local Lighting = game:GetService("Lighting")
+local TweenService = game:GetService("TweenService")
+local UIS = game:GetService("UserInputService")
 local LP = Players.LocalPlayer
 local PC = LP.PlayerScripts.Client.Controllers
 
 local Hub = {
     Running = true,
+    Binding = false,
     Flags = { AutoThrow = false, AutoTrain = false, Cycle = false, AutoEquip = false, AutoFood = false, AutoBar = false, AutoPlot = false, AutoSell = false,
               Speed = false, Jump = false, Fov = false, FpsBoost = false, Fog = false, Fullbright = false, AntiAfk = true },
     Conns = {},
@@ -27,11 +31,17 @@ local Hub = {
         SellMode = "จำกัด Rarity", SellRarity = "Rare", SellPlaced = false,
         SellEvery = 3, SellStep = 0.15,
         WalkSpeed = 16, JumpPower = 50, Fov = 70,
+        Notify = true, ShowFPS = false, AutoSave = true,
     },
     Stats = { Throws = 0, Fails = 0, Taps = 0, Equips = 0, Food = 0, Bar = 0, Plot = 0,
               Sold = 0, SellMoney = 0, Last = "-", TrainLast = "-", ShopLast = "-", EquipLast = "-", SellLast = "-", CycleLast = "-", MiscLast = "-" },
 }
 getgenv().TwoK = Hub
+
+local function track(c)
+    table.insert(Hub.Conns, c)
+    return c
+end
 
 local function tryReq(m)
     local ok, r = pcall(require, m)
@@ -57,7 +67,8 @@ local ThrowMeter  = tryReq(PC.ThrowMeter)
 local ThrowCtrl   = tryReq(PC.ThrowController)
 local DataCtrl    = tryReq(PC.DataController)
 
-local UI = nil
+-- UI ตัวจริงจะถูกนิยามทับด้านล่าง (Notify มุมขวาล่าง)
+local UI = { Notify = function() end }
 
 Hub.LaunchPos = Vector3.new(0, 2.5, -45)
 if AreaUtil and AreaUtil.GetLaunchPosition then
@@ -205,11 +216,11 @@ if type(Remotes.Invoke) == "function" then
                         string.format("%.0f", tonumber(res.Distance) or 0),
                         fmtPS(inc or 0))
                     Hub.Stats.Last = txt
-                    if UI then UI:Notify({ Title = "Throw #" .. tostring(Hub.Stats.Throws), Text = txt, Duration = 3 }) end
+                    UI:Notify({ Title = "Throw #" .. tostring(Hub.Stats.Throws), Text = txt, Duration = 3 })
                 else
                     Hub.Stats.Fails = Hub.Stats.Fails + 1
                     Hub.Stats.Last = "FAIL: " .. tostring(res.Reason)
-                    if UI then UI:Notify({ Title = "Throw พลาด", Text = tostring(res.Reason), Duration = 2 }) end
+                    UI:Notify({ Title = "Throw พลาด", Text = tostring(res.Reason), Duration = 2 })
                 end
             elseif name == "Throw_Start" and type(res) == "table" and not res.Ok then
                 Hub.Stats.Fails = Hub.Stats.Fails + 1
@@ -224,7 +235,7 @@ end
 do
     local ok, ev = pcall(function() return Remotes.Event("Training_Bonus") end)
     if ok and ev then
-        table.insert(Hub.Conns, ev.OnClientEvent:Connect(function(id)
+        track(ev.OnClientEvent:Connect(function(id)
             if not (Hub.Flags.AutoTrain or Hub.Flags.Cycle) then return end
             local okTap, r = pcall(function() return Remotes.Invoke("Training_TapBonus", id) end)
             if okTap and type(r) == "table" and r.Ok then
@@ -310,7 +321,7 @@ end
 local function sellBatch(notify)
     local targets = collectSellTargets()
     if #targets == 0 then
-        if notify and UI then UI:Notify({ Title = "Auto Sell", Text = "ไม่มีสัตว์ที่ตรงเงื่อนไข", Duration = 3 }) end
+        if notify then UI:Notify({ Title = "Auto Sell", Text = "ไม่มีสัตว์ที่ตรงเงื่อนไข", Duration = 3 }) end
         return 0, 0
     end
     local count, gained = 0, 0
@@ -327,7 +338,7 @@ local function sellBatch(notify)
     Hub.Stats.SellMoney = Hub.Stats.SellMoney + gained
     if count > 0 then
         Hub.Stats.SellLast = string.format("ขาย %d ตัว ได้ %s", count, fmtMoney(gained))
-        if UI then UI:Notify({ Title = "Auto Sell", Text = Hub.Stats.SellLast, Duration = 3 }) end
+        UI:Notify({ Title = "Auto Sell", Text = Hub.Stats.SellLast, Duration = 3 })
     end
     return count, gained
 end
@@ -450,56 +461,301 @@ local function applyJump(on)
     end
 end
 
--- ================= UI =================
-UI = loadstring(game:HttpGet("https://ai.zeinstore.xyz/prism.luau"))()
-Hub.UI = UI
+-- =====================================================================
+-- ================= UI : MouSey Hub ===================================
+-- =====================================================================
+local T = {
+    bg = Color3.fromRGB(10, 10, 12),
+    panel = Color3.fromRGB(18, 18, 21),
+    line = Color3.fromRGB(42, 42, 50),
+    text = Color3.fromRGB(236, 236, 242),
+    dim = Color3.fromRGB(128, 128, 138),
+    off = Color3.fromRGB(52, 52, 60),
+    on = Color3.fromRGB(246, 246, 250),
+}
 
-function Hub.Stop()
-    Hub.Running = false
-    for k in pairs(Hub.Flags) do Hub.Flags[k] = false end
-    pcall(function() Remotes.Invoke("Training_Stop") end)
-    pcall(function() applyFpsBoost(false) end)
-    pcall(function() applyFog(false) end)
-    pcall(function() applyFullbright(false) end)
-    pcall(function() applyWalk(false) end)
-    pcall(function() applyJump(false) end)
-    pcall(function() local cam = workspace.CurrentCamera; if cam then cam.FieldOfView = 70 end end)
-    if ThrowMeter then
-        ThrowMeter.TestAutoTap = nil
-        if Hub.OrigRun then ThrowMeter.Run = Hub.OrigRun end
-    end
-    if Hub.OrigInvoke then Remotes.Invoke = Hub.OrigInvoke end
-    for _, c in ipairs(Hub.Conns) do pcall(function() c:Disconnect() end) end
-    Hub.Conns = {}
-    pcall(function() UI:Destroy() end)
+local Icons = {
+    Farm = "🌾",
+    Train = "⚔",
+    Shop = "🛒",
+    Sell = "💰",
+    Misc = "🧰",
+    Setting = "⚙",
+}
+local TabOrder = { "Farm", "Train", "Shop", "Sell", "Misc", "Setting" }
+
+local function new(class, props, parent)
+    local o = Instance.new(class)
+    for k, v in pairs(props) do o[k] = v end
+    if parent then o.Parent = parent end
+    return o
+end
+local function corner(p, r) return new("UICorner", { CornerRadius = UDim.new(0, r) }, p) end
+local function stroke(p, col, tr) return new("UIStroke", { Color = col or T.line, Transparency = tr or 0, Thickness = 1 }, p) end
+local function tween(o, goal, t) TweenService:Create(o, TweenInfo.new(t or 0.2, Enum.EasingStyle.Quint), goal):Play() end
+local function label(parent, text, size, pos, color, font, xa)
+    return new("TextLabel", {
+        BackgroundTransparency = 1, Size = size, Position = pos or UDim2.new(),
+        Text = text, TextColor3 = color or T.text, TextSize = 13,
+        Font = font or Enum.Font.GothamMedium, TextXAlignment = xa or Enum.TextXAlignment.Left,
+    }, parent)
 end
 
-UI:SetTitle("2K | Throw Food For Animals")
+local function getGuiParent()
+    local ok, hui = pcall(function() return gethui and gethui() end)
+    if ok and hui then return hui end
+    local ok2, cg = pcall(function() return game:GetService("CoreGui") end)
+    if ok2 and cg then return cg end
+    return LP:WaitForChild("PlayerGui")
+end
 
--- ---------------- FARM ----------------
-local TabFarm = UI:Tab("FARM")
+local gui = new("ScreenGui", {
+    Name = "MouSeyHub", ResetOnSpawn = false,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling, IgnoreGuiInset = true,
+}, getGuiParent())
 
--- Section 1 : Auto Throw Perfect
-local SF = TabFarm:Section("AUTO THROW (PERFECT)")
-SF:Toggle({ Name = "Auto Throw", Desc = "วาร์ปจุดโยน + โยน PERFECT วนซ้ำ (แจ้งผลทุกครั้ง)", Default = false,
-    Callback = function(v)
-        Hub.Flags.AutoThrow = v
-        if v then
-            if not Hub.Flags.Cycle then
-                Hub.Flags.AutoTrain = false
-                Hub.InTrain = false
-                pcall(function() Remotes.Invoke("Training_Stop") end)
-            end
+Hub.Opts.MenuKey = Enum.KeyCode.RightShift
+local MIN_W, MIN_H = 420, 260
+local MAX_W, MAX_H = 900, 640
+Hub.Opts.MenuSize = Vector2.new(540, 340)
+local function fullSize()
+    return UDim2.fromOffset(Hub.Opts.MenuSize.X, Hub.Opts.MenuSize.Y)
+end
+local minimized = false
+
+-- ===== main window =====
+local main = new("Frame", {
+    Size = fullSize(), Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
+    BackgroundColor3 = T.bg, BorderSizePixel = 0, ClipsDescendants = true,
+}, gui)
+corner(main, 12); stroke(main)
+
+local top = new("Frame", { Size = UDim2.new(1, 0, 0, 40), BackgroundTransparency = 1 }, main)
+label(top, "MouSey Hub", UDim2.new(0, 110, 1, 0), UDim2.fromOffset(16, 0), T.text, Enum.Font.GothamBold)
+label(top, "@" .. LP.Name, UDim2.new(0, 200, 1, 0), UDim2.fromOffset(122, 0), T.dim, Enum.Font.Gotham)
+local gameTitle = label(top, "🐶Throw Food For Animals🌭", UDim2.new(1, 0, 1, 0), UDim2.fromOffset(40, 0), T.text, Enum.Font.GothamBold)
+gameTitle.TextXAlignment = Enum.TextXAlignment.Center
+gameTitle.ZIndex = 2
+new("Frame", { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.fromOffset(0, 40), BackgroundColor3 = T.line, BorderSizePixel = 0 }, main)
+
+local function iconBtn(parent, txt, x)
+    local b = new("TextButton", {
+        Size = UDim2.fromOffset(26, 26), Position = UDim2.new(1, x, 0.5, -13),
+        BackgroundColor3 = T.panel, BorderSizePixel = 0, AutoButtonColor = false,
+        Text = txt, TextColor3 = T.dim, TextSize = 16, Font = Enum.Font.GothamBold,
+    }, parent)
+    corner(b, 7); stroke(b)
+    b.MouseEnter:Connect(function() tween(b, { TextColor3 = T.text }, 0.15) end)
+    b.MouseLeave:Connect(function() tween(b, { TextColor3 = T.dim }, 0.15) end)
+    return b
+end
+local minBtn = iconBtn(top, "–", -66)
+local closeBtn = iconBtn(top, "×", -34)
+
+local body = new("Frame", { Size = UDim2.new(1, 0, 1, -41), Position = UDim2.fromOffset(0, 41), BackgroundTransparency = 1 }, main)
+local side = new("Frame", { Size = UDim2.new(0, 52, 1, 0), BackgroundTransparency = 1 }, body)
+local content = new("Frame", { Size = UDim2.new(1, -52, 1, 0), Position = UDim2.fromOffset(52, 0), BackgroundTransparency = 1 }, body)
+new("Frame", { Size = UDim2.new(0, 1, 1, 0), Position = UDim2.fromOffset(52, 0), BackgroundColor3 = T.line, BorderSizePixel = 0 }, body)
+
+-- ===== tabs =====
+local tabs, pages = {}, {}
+local function selectTab(name)
+    for n, pg in pairs(pages) do pg.Visible = (n == name) end
+    for n, b in pairs(tabs) do
+        tween(b, {
+            BackgroundColor3 = (n == name) and T.panel or T.bg,
+            TextColor3 = (n == name) and T.text or T.dim,
+        }, 0.15)
+    end
+end
+
+for i, name in ipairs(TabOrder) do
+    local b = new("TextButton", {
+        Size = UDim2.fromOffset(36, 36), Position = UDim2.fromOffset(8, 12 + (i - 1) * 42),
+        BackgroundColor3 = T.bg, BorderSizePixel = 0, AutoButtonColor = false,
+        Text = Icons[name], TextColor3 = T.dim, TextSize = 16, Font = Enum.Font.GothamBold,
+    }, side)
+    corner(b, 9)
+    tabs[name] = b
+    pages[name] = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false }, content)
+    b.MouseButton1Click:Connect(function() selectTab(name) end)
+end
+
+local pfp = new("ImageLabel", {
+    Size = UDim2.fromOffset(34, 34), Position = UDim2.new(0, 9, 1, -43),
+    BackgroundColor3 = T.panel, BorderSizePixel = 0,
+}, side)
+corner(pfp, 17); stroke(pfp)
+task.spawn(function()
+    local ok, img = pcall(Players.GetUserThumbnailAsync, Players, LP.UserId,
+        Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100)
+    if ok then pfp.Image = img end
+end)
+
+-- ===== components =====
+local function column(parent, x)
+    local c = new("ScrollingFrame", {
+        Size = UDim2.new(0, 218, 1, -16), Position = UDim2.fromOffset(x, 8),
+        BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 2,
+        ScrollBarImageColor3 = T.line, AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        CanvasSize = UDim2.new(), ScrollingDirection = Enum.ScrollingDirection.Y,
+    }, parent)
+    new("UIListLayout", { Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder }, c)
+    return c
+end
+
+local function card(parent, title, order)
+    local f = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundColor3 = T.panel, BorderSizePixel = 0, LayoutOrder = order,
+    }, parent)
+    corner(f, 10); stroke(f)
+    new("UIPadding", {
+        PaddingTop = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10),
+        PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12),
+    }, f)
+    new("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, f)
+    label(f, title, UDim2.new(1, 0, 0, 14), nil, T.dim, Enum.Font.GothamBold).LayoutOrder = 0
+    return f
+end
+
+local function toggle(parent, text, default, order, callback)
+    local state = default
+    local row = new("TextButton", {
+        Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1,
+        Text = "", AutoButtonColor = false, LayoutOrder = order,
+    }, parent)
+    label(row, text, UDim2.new(1, -60, 1, 0))
+    local glow = new("Frame", {
+        Size = UDim2.fromOffset(52, 30), AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, 7, 0.5, 0), BackgroundColor3 = T.on,
+        BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 1,
+    }, row)
+    corner(glow, 15)
+    local track = new("Frame", {
+        Size = UDim2.fromOffset(38, 20), AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, 0, 0.5, 0), BackgroundColor3 = T.off,
+        BorderSizePixel = 0, ZIndex = 2,
+    }, row)
+    corner(track, 10)
+    local knob = new("Frame", {
+        Size = UDim2.fromOffset(16, 16), BackgroundColor3 = T.dim,
+        BorderSizePixel = 0, ZIndex = 3,
+    }, track)
+    corner(knob, 8)
+
+    local function render(anim)
+        local t = anim and 0.2 or 0
+        tween(track, { BackgroundColor3 = state and T.on or T.off }, t)
+        tween(knob, {
+            Position = state and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8),
+            BackgroundColor3 = state and T.bg or T.dim,
+        }, t)
+        tween(glow, { BackgroundTransparency = state and 0.86 or 1 }, t)
+    end
+    render(false)
+    row.MouseButton1Click:Connect(function()
+        state = not state
+        render(true)
+        if callback then callback(state) end
+    end)
+end
+
+local function dropdown(parent, text, options, default, order, callback)
+    local idx = table.find(options, default) or 1
+    local row = new("Frame", { Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1, LayoutOrder = order }, parent)
+    label(row, text, UDim2.new(1, -124, 1, 0), nil, T.text)
+    local btn = new("TextButton", {
+        Size = UDim2.new(0, 116, 1, 0), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0),
+        BackgroundColor3 = T.bg, BorderSizePixel = 0, AutoButtonColor = false,
+        Text = options[idx] .. "  ▾", TextColor3 = T.text, TextSize = 12,
+        Font = Enum.Font.GothamMedium, TextTruncate = Enum.TextTruncate.AtEnd,
+    }, row)
+    corner(btn, 7); stroke(btn)
+    btn.MouseButton1Click:Connect(function()
+        idx = idx % #options + 1
+        btn.Text = options[idx] .. "  ▾"
+        if callback then callback(options[idx]) end
+    end)
+    if callback then callback(options[idx]) end
+end
+
+local function slider(parent, text, min, max, default, order, callback)
+    local function pct(v) return (v - min) / (max - min) end
+    local row = new("Frame", { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, LayoutOrder = order }, parent)
+    label(row, text, UDim2.new(1, -50, 0, 14), nil, T.text)
+    local val = label(row, tostring(default), UDim2.new(0, 46, 0, 14), UDim2.new(1, -46, 0, 0),
+        T.dim, Enum.Font.Gotham, Enum.TextXAlignment.Right)
+    local bar = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 4), Position = UDim2.fromOffset(0, 22),
+        BackgroundColor3 = T.off, BorderSizePixel = 0,
+    }, row)
+    corner(bar, 2)
+    local fill = new("Frame", { Size = UDim2.fromScale(pct(default), 1), BackgroundColor3 = T.on, BorderSizePixel = 0 }, bar)
+    corner(fill, 2)
+    local knob = new("Frame", {
+        Size = UDim2.fromOffset(10, 10), AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(pct(default), 0.5), BackgroundColor3 = T.on, BorderSizePixel = 0,
+    }, bar)
+    corner(knob, 5)
+    new("UIStroke", { Color = T.on, Transparency = 0.55, Thickness = 3 }, knob)
+    local hit = new("TextButton", {
+        Size = UDim2.new(1, 0, 0, 16), Position = UDim2.fromOffset(0, 14),
+        BackgroundTransparency = 1, Text = "", AutoButtonColor = false,
+    }, row)
+
+    local dragging = false
+    local function set(px)
+        local rel = math.clamp((px - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+        local v = math.floor(min + (max - min) * rel + 0.5)
+        fill.Size = UDim2.fromScale(rel, 1)
+        knob.Position = UDim2.fromScale(rel, 0.5)
+        val.Text = tostring(v)
+        if callback then callback(v) end
+    end
+    local function isPress(i)
+        return i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch
+    end
+    hit.InputBegan:Connect(function(i) if isPress(i) then dragging = true set(i.Position.X) end end)
+    track(UIS.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            set(i.Position.X)
         end
-    end })
-SF:Slider({ Name = "Delay (s)", Min = 1.5, Max = 6, Step = 0.1, Default = 2, Suffix = "s",
-    Callback = function(v) Hub.Opts.ThrowDelay = v end })
-SF:Button({ Name = "วาร์ปไปจุดโยน", Callback = function() warp(Hub.LaunchPos) end })
+    end))
+    track(UIS.InputEnded:Connect(function(i) if isPress(i) then dragging = false end end))
+end
 
--- Section 2 : Cycle โยน -> เทรน (อยู่ด้านล่าง Auto Throw)
-local SC = TabFarm:Section("CYCLE : โยน N ครั้ง -> เทรน M วินาที")
-SC:Toggle({ Name = "เปิด Cycle (โยน ↔ เทรน)", Desc = "สลับอัตโนมัติ: โยนครบ N ครั้ง แล้วไปเทรน M วินาที วนซ้ำ", Default = false,
-    Callback = function(v)
+local function button(parent, text, order, callback)
+    local b = new("TextButton", {
+        Size = UDim2.new(1, 0, 0, 26), BackgroundColor3 = T.bg, BorderSizePixel = 0,
+        AutoButtonColor = false, Text = text, TextColor3 = T.text, TextSize = 12,
+        Font = Enum.Font.GothamMedium, LayoutOrder = order,
+    }, parent)
+    corner(b, 7); stroke(b)
+    b.MouseEnter:Connect(function() tween(b, { TextColor3 = T.on }, 0.15) end)
+    b.MouseLeave:Connect(function() tween(b, { TextColor3 = T.text }, 0.15) end)
+    b.MouseButton1Click:Connect(function() if callback then callback() end end)
+    return b
+end
+
+-- ===== page content (ผูกกับ logic เดิมผ่าน callback) =====
+local function buildUI()
+    -- ---------------- FARM ----------------
+    local f1, f2 = column(pages.Farm, 12), column(pages.Farm, 258)
+    local c = card(f1, "AUTO THROW (PERFECT)", 1)
+    toggle(c, "Auto Throw", false, 1, function(v)
+        Hub.Flags.AutoThrow = v
+        if v and not Hub.Flags.Cycle then
+            Hub.Flags.AutoTrain = false
+            Hub.InTrain = false
+            pcall(function() Remotes.Invoke("Training_Stop") end)
+        end
+    end)
+    slider(c, "Delay (s)", 1.5, 6, 2, 2, function(v) Hub.Opts.ThrowDelay = v end)
+    button(c, "วาร์ปไปจุดโยน", 3, function() warp(Hub.LaunchPos) end)
+
+    c = card(f1, "CYCLE : โยน N ครั้ง -> เทรน M วินาที", 2)
+    toggle(c, "เปิด Cycle (โยน ↔ เทรน)", false, 1, function(v)
         Hub.Flags.Cycle = v
         Hub.CyclePhase = "Throw"
         Hub.CycleThrown = 0
@@ -517,61 +773,52 @@ SC:Toggle({ Name = "เปิด Cycle (โยน ↔ เทรน)", Desc = "�
             Hub.InTrain = false
             pcall(function() Remotes.Invoke("Training_Stop") end)
             Hub.Stats.CycleLast = "ปิด Cycle"
-            pcall(function() UI:SetStatus("Cycle: ปิด") end)
         end
-    end })
-SC:Slider({ Name = "โยนกี่ครั้ง", Min = 1, Max = 50, Step = 1, Default = 5, Suffix = " ครั้ง",
-    Callback = function(v) Hub.Opts.CycleThrows = math.floor(v) end })
-SC:Slider({ Name = "เทรนกี่วินาที", Min = 5, Max = 300, Step = 5, Default = 30, Suffix = " วิ",
-    Callback = function(v) Hub.Opts.CycleTrainSecs = math.floor(v) end })
-SC:Slider({ Name = "จำนวนรอบ (0 = ไม่จำกัด)", Min = 0, Max = 100, Step = 1, Default = 0, Suffix = " รอบ",
-    Callback = function(v) Hub.Opts.CycleRounds = math.floor(v) end })
-SC:Button({ Name = "ดูสถานะ Cycle", Callback = function()
-    local phase = Hub.CyclePhase
-    local left = math.max(0, math.floor((Hub.CycleTrainEnd or 0) - os.clock()))
-    local lines = {
-        string.format("สถานะ: %s", Hub.Flags.Cycle and ("เปิด (" .. tostring(phase) .. ")") or "ปิด"),
-        string.format("โยนแล้วรอบนี้: %d / %d", Hub.CycleThrown, Hub.Opts.CycleThrows),
-        string.format("เทรนเหลือ: %d วิ (รอบละ %d วิ)", left, Hub.Opts.CycleTrainSecs),
-        string.format("รอบที่ทำครบ: %d %s", Hub.CycleDone,
-            Hub.Opts.CycleRounds > 0 and ("/ " .. Hub.Opts.CycleRounds) or "(ไม่จำกัด)"),
-        string.format("โยนรวม: %d (พลาด %d) | x2 ที่กด: %d", Hub.Stats.Throws, Hub.Stats.Fails, Hub.Stats.Taps),
-        "ล่าสุด: " .. tostring(Hub.Stats.CycleLast),
-    }
-    UI:Notify({ Title = "Cycle โยน ↔ เทรน", Text = table.concat(lines, "\n"), Duration = 10 })
-end })
-
--- Section 3 : Auto Equip Best
-local SE = TabFarm:Section("AUTO EQUIP BEST (เงิน/วินาที)")
-SE:Toggle({ Name = "Auto Equip Best", Desc = "จัดสัตว์ที่ให้เงิน/วิ สูงสุดลง Plot ให้เอง", Default = false,
-    Callback = function(v) Hub.Flags.AutoEquip = v end })
-SE:Slider({ Name = "เช็กทุกกี่วิ", Min = 2, Max = 30, Step = 1, Default = 5, Suffix = "s",
-    Callback = function(v) Hub.Opts.EquipDelay = v end })
-SE:Button({ Name = "Equip Best เดี๋ยวนี้", Callback = function()
-    task.spawn(function()
-        local msg = equipBest()
-        Hub.Stats.EquipLast = msg
-        UI:Notify({ Title = "Equip Best", Text = msg, Duration = 5 })
     end)
-end })
-SE:Button({ Name = "ดูอันดับสัตว์ (เงิน/วิ)", Callback = function()
-    local list = animalsList()
-    local lines = {}
-    for i = 1, math.min(#list, 8) do
-        local a = list[i]
-        lines[#lines + 1] = string.format("%d. %s %s%s = %s%s", i, tostring(a.Model),
-            a.Rarity and ("[" .. a.Rarity .. "] ") or "", a.Placed and "(วาง)" or "",
-            fmtPS(a.Income or 0), a.Mutation and (" [" .. a.Mutation .. "]") or "")
-    end
-    if #lines == 0 then lines[1] = "ยังไม่มีสัตว์" end
-    UI:Notify({ Title = string.format("อันดับสัตว์ (%d ตัว)", #list), Text = table.concat(lines, "\n"), Duration = 10 })
-end })
+    slider(c, "โยนกี่ครั้ง", 1, 50, 5, 2, function(v) Hub.Opts.CycleThrows = math.floor(v) end)
+    slider(c, "เทรนกี่วินาที", 5, 300, 30, 3, function(v) Hub.Opts.CycleTrainSecs = math.floor(v) end)
+    slider(c, "จำนวนรอบ (0 = ไม่จำกัด)", 0, 100, 0, 4, function(v) Hub.Opts.CycleRounds = math.floor(v) end)
+    button(c, "ดูสถานะ Cycle", 5, function()
+        local left = math.max(0, math.floor((Hub.CycleTrainEnd or 0) - os.clock()))
+        local lines = {
+            string.format("สถานะ: %s", Hub.Flags.Cycle and ("เปิด (" .. tostring(Hub.CyclePhase) .. ")") or "ปิด"),
+            string.format("โยนแล้วรอบนี้: %d / %d", Hub.CycleThrown, Hub.Opts.CycleThrows),
+            string.format("เทรนเหลือ: %d วิ (รอบละ %d วิ)", left, Hub.Opts.CycleTrainSecs),
+            string.format("รอบที่ทำครบ: %d %s", Hub.CycleDone,
+                Hub.Opts.CycleRounds > 0 and ("/ " .. Hub.Opts.CycleRounds) or "(ไม่จำกัด)"),
+            string.format("โยนรวม: %d (พลาด %d) | x2 ที่กด: %d", Hub.Stats.Throws, Hub.Stats.Fails, Hub.Stats.Taps),
+            "ล่าสุด: " .. tostring(Hub.Stats.CycleLast),
+        }
+        UI:Notify({ Title = "Cycle โยน ↔ เทรน", Text = table.concat(lines, "\n"), Duration = 10 })
+    end)
 
--- ---------------- TRAIN ----------------
-local TabTrain = UI:Tab("TRAIN")
-local ST = TabTrain:Section("AUTO TRAIN + AUTO x2")
-ST:Toggle({ Name = "Auto Train", Desc = "วาร์ปไปจุดเทรน + เริ่มเทรน + กด x2 ให้เองตลอดเวลา", Default = false,
-    Callback = function(v)
+    c = card(f2, "AUTO EQUIP BEST (เงิน/วินาที)", 1)
+    toggle(c, "Auto Equip Best", false, 1, function(v) Hub.Flags.AutoEquip = v end)
+    slider(c, "เช็กทุกกี่วิ", 2, 30, 5, 2, function(v) Hub.Opts.EquipDelay = v end)
+    button(c, "Equip Best เดี๋ยวนี้", 3, function()
+        task.spawn(function()
+            local msg = equipBest()
+            Hub.Stats.EquipLast = msg
+            UI:Notify({ Title = "Equip Best", Text = msg, Duration = 5 })
+        end)
+    end)
+    button(c, "ดูอันดับสัตว์ (เงิน/วิ)", 4, function()
+        local list = animalsList()
+        local lines = {}
+        for i = 1, math.min(#list, 8) do
+            local a = list[i]
+            lines[#lines + 1] = string.format("%d. %s %s%s = %s%s", i, tostring(a.Model),
+                a.Rarity and ("[" .. a.Rarity .. "] ") or "", a.Placed and "(วาง)" or "",
+                fmtPS(a.Income or 0), a.Mutation and (" [" .. a.Mutation .. "]") or "")
+        end
+        if #lines == 0 then lines[1] = "ยังไม่มีสัตว์" end
+        UI:Notify({ Title = string.format("อันดับสัตว์ (%d ตัว)", #list), Text = table.concat(lines, "\n"), Duration = 10 })
+    end)
+
+    -- ---------------- TRAIN ----------------
+    local t1 = column(pages.Train, 12)
+    c = card(t1, "AUTO TRAIN + AUTO x2", 1)
+    toggle(c, "Auto Train", false, 1, function(v)
         Hub.Flags.AutoTrain = v
         Hub.InTrain = false
         if v then
@@ -579,143 +826,360 @@ ST:Toggle({ Name = "Auto Train", Desc = "วาร์ปไปจุดเทร
         else
             if not Hub.Flags.Cycle then pcall(function() Remotes.Invoke("Training_Stop") end) end
         end
-    end })
-ST:Slider({ Name = "ระยะหลุดจากจุดเทรน (studs)", Min = 2, Max = 20, Step = 1, Default = 8, Suffix = " studs",
-    Callback = function(v) Hub.Opts.DriftRadius = v end })
+    end)
+    slider(c, "ระยะหลุดจากจุดเทรน (studs)", 2, 20, 8, 2, function(v) Hub.Opts.DriftRadius = v end)
 
--- ---------------- SHOP ----------------
-local TabShop = UI:Tab("SHOP")
-local SS = TabShop:Section("AUTO BUY FOOD")
-SS:Toggle({ Name = "Auto Buy Food", Desc = "ซื้ออาหารให้เองเมื่อเงินพอ", Default = false,
-    Callback = function(v) Hub.Flags.AutoFood = v end })
-SS:Dropdown({ Name = "โหมดซื้ออาหาร", Options = { "แพงสุดที่ไหว", "ถูกสุดที่ไหว" }, Default = "แพงสุดที่ไหว",
-    Callback = function(v) Hub.Opts.FoodMode = v end })
-SS:Toggle({ Name = "Equip อาหารที่ซื้อ", Default = true,
-    Callback = function(v) Hub.Opts.AutoEquipFood = v end })
+    -- ---------------- SHOP ----------------
+    local s1, s2 = column(pages.Shop, 12), column(pages.Shop, 258)
+    c = card(s1, "AUTO BUY FOOD", 1)
+    toggle(c, "Auto Buy Food", false, 1, function(v) Hub.Flags.AutoFood = v end)
+    dropdown(c, "โหมดซื้ออาหาร", { "แพงสุดที่ไหว", "ถูกสุดที่ไหว" }, "แพงสุดที่ไหว", 2,
+        function(v) Hub.Opts.FoodMode = v end)
+    toggle(c, "Equip อาหารที่ซื้อ", true, 3, function(v) Hub.Opts.AutoEquipFood = v end)
+    c = card(s1, "AUTO UPGRADE BAR", 2)
+    toggle(c, "Auto Buy Bar", false, 1, function(v) Hub.Flags.AutoBar = v end)
+    c = card(s2, "AUTO UPGRADE PLOT", 1)
+    toggle(c, "Auto Upgrade Plot", false, 1, function(v) Hub.Flags.AutoPlot = v end)
+    c = card(s2, "ตั้งค่า", 2)
+    slider(c, "เก็บเงินสำรองไว้", 0, 1000000000000, 0, 1, function(v) Hub.Opts.Reserve = v end)
+    slider(c, "เช็กทุกกี่วิ", 0.5, 10, 1.5, 2, function(v) Hub.Opts.ShopDelay = v end)
+    button(c, "ดูสถานะร้านค้า", 3, function()
+        local d = data()
+        local nx = StandsConf and d and StandsConf.All[tonumber(d.Stand) + 1]
+        local nu = FenceConfig and d and FenceConfig.Upgrades[tonumber(d.FenceLevel) + 1]
+        UI:Notify({ Title = "Shop", Duration = 8, Text = string.format(
+            "เงิน: %s\nบาร์: %s (ต่อไป %s)\nPlot Lv %s (ต่อไป %s)\nอาหาร: %s\nล่าสุด: %s",
+            fmtMoney(money()), tostring(d and d.Stand), nx and fmtMoney(nx.Price) or "MAX",
+            tostring(d and d.FenceLevel), nu and fmtMoney(nu.Price) or "MAX",
+            tostring(d and d.EquippedFood), tostring(Hub.Stats.ShopLast)) })
+    end)
 
-local SB = TabShop:Section("AUTO UPGRADE BAR")
-SB:Toggle({ Name = "Auto Buy Bar", Desc = "อัพบาร์ตัวถัดไปเมื่อเงินพอ", Default = false,
-    Callback = function(v) Hub.Flags.AutoBar = v end })
+    -- ---------------- SELL ----------------
+    local l1, l2 = column(pages.Sell, 12), column(pages.Sell, 258)
+    c = card(l1, "AUTO SELL", 1)
+    toggle(c, "Auto Sell", false, 1, function(v) Hub.Flags.AutoSell = v end)
+    dropdown(c, "โหมดขาย", { "ขายทั้งหมด", "จำกัด Rarity" }, "จำกัด Rarity", 2,
+        function(v) Hub.Opts.SellMode = v end)
+    dropdown(c, "ขาย Rarity ถึงระดับ", RARITY_ORDER, "Rare", 3,
+        function(v) Hub.Opts.SellRarity = v end)
+    toggle(c, "รวมสัตว์ที่วางบน Plot", false, 4, function(v) Hub.Opts.SellPlaced = v end)
+    c = card(l2, "TIMING", 1)
+    slider(c, "ตรวจทุกกี่วิ", 1, 30, 3, 1, function(v) Hub.Opts.SellEvery = v end)
+    slider(c, "หน่วงต่อตัว", 0.05, 1, 0.15, 2, function(v) Hub.Opts.SellStep = v end)
+    button(c, "ขายตามเงื่อนไขเดี๋ยวนี้", 3, function()
+        task.spawn(function() sellBatch(true) end)
+    end)
 
-local SP = TabShop:Section("AUTO UPGRADE PLOT")
-SP:Toggle({ Name = "Auto Upgrade Plot", Desc = "อัพ Plot (เพิ่มช่องสัตว์) เมื่อเงินพอ", Default = false,
-    Callback = function(v) Hub.Flags.AutoPlot = v end })
-
-local SG = TabShop:Section("ตั้งค่า")
-SG:Slider({ Name = "เก็บเงินสำรองไว้", Min = 0, Max = 1000000000000, Step = 1000000000, Default = 0, Suffix = "",
-    Callback = function(v) Hub.Opts.Reserve = v end })
-SG:Slider({ Name = "เช็กทุกกี่วิ", Min = 0.5, Max = 10, Step = 0.5, Default = 1.5, Suffix = "s",
-    Callback = function(v) Hub.Opts.ShopDelay = v end })
-SG:Button({ Name = "ดูสถานะร้านค้า", Callback = function()
-    local d = data()
-    local nx = StandsConf and d and StandsConf.All[tonumber(d.Stand) + 1]
-    local nu = FenceConfig and d and FenceConfig.Upgrades[tonumber(d.FenceLevel) + 1]
-    UI:Notify({ Title = "Shop", Duration = 8, Text = string.format(
-        "เงิน: %s\nบาร์: %s (ต่อไป %s)\nPlot Lv %s (ต่อไป %s)\nอาหาร: %s\nล่าสุด: %s",
-        fmtMoney(money()), tostring(d and d.Stand), nx and fmtMoney(nx.Price) or "MAX",
-        tostring(d and d.FenceLevel), nu and fmtMoney(nu.Price) or "MAX",
-        tostring(d and d.EquippedFood), tostring(Hub.Stats.ShopLast)) })
-end })
-
--- ---------------- SELL ----------------
-local TabSell = UI:Tab("SELL")
-local SSell = TabSell:Section("AUTO SELL")
-SSell:Toggle({ Name = "Auto Sell", Desc = "ขายสัตว์ในกระเป๋าตามเงื่อนไขด้านล่างให้เอง", Default = false,
-    Callback = function(v) Hub.Flags.AutoSell = v end })
-SSell:Dropdown({ Name = "โหมดขาย", Options = { "ขายทั้งหมด", "จำกัด Rarity" }, Default = "จำกัด Rarity",
-    Callback = function(v) Hub.Opts.SellMode = v end })
-SSell:Dropdown({ Name = "ขาย Rarity ถึงระดับ", Options = RARITY_ORDER, Default = "Rare",
-    Callback = function(v) Hub.Opts.SellRarity = v end })
-SSell:Toggle({ Name = "รวมสัตว์ที่วางบน Plot", Desc = "ปิดไว้ = ไม่ขายตัวที่กำลังทำเงินอยู่", Default = false,
-    Callback = function(v) Hub.Opts.SellPlaced = v end })
-SSell:Slider({ Name = "ตรวจทุกกี่วิ", Min = 1, Max = 30, Step = 1, Default = 3, Suffix = "s",
-    Callback = function(v) Hub.Opts.SellEvery = v end })
-SSell:Slider({ Name = "หน่วงต่อตัว", Min = 0.05, Max = 1, Step = 0.05, Default = 0.15, Suffix = "s",
-    Callback = function(v) Hub.Opts.SellStep = v end })
-SSell:Button({ Name = "ขายตามเงื่อนไขเดี๋ยวนี้", Callback = function()
-    task.spawn(function() sellBatch(true) end)
-end })
-SSell:Label("โหมด 'จำกัด Rarity' = ขายเฉพาะสัตว์ Rarity ตั้งแต่ระดับที่เลือก 'ลงมา' เท่านั้น")
-
--- ---------------- MISC ----------------
-local TabMisc = UI:Tab("MISC")
-
-local SM1 = TabMisc:Section("PLAYER (ความเร็ว / กระโดด)")
-SM1:Toggle({ Name = "WalkSpeed", Desc = "เปิดเพื่อบังคับความเร็ววิ่งตามสไลเดอร์", Default = false,
-    Callback = function(v)
+    -- ---------------- MISC ----------------
+    local m1, m2 = column(pages.Misc, 12), column(pages.Misc, 258)
+    c = card(m1, "PLAYER (ความเร็ว / กระโดด)", 1)
+    toggle(c, "WalkSpeed", false, 1, function(v)
         Hub.Flags.Speed = v
         applyWalk(v)
-    end })
-SM1:Slider({ Name = "ความเร็ววิ่ง", Min = 16, Max = 500, Step = 1, Default = 16, Suffix = "",
-    Callback = function(v)
+    end)
+    slider(c, "ความเร็ววิ่ง", 16, 500, 16, 2, function(v)
         Hub.Opts.WalkSpeed = v
         if Hub.Flags.Speed then applyWalk(true) end
-    end })
-SM1:Toggle({ Name = "JumpPower (กระโดดสูง)", Desc = "เปิดเพื่อบังคับความสูงกระโดด", Default = false,
-    Callback = function(v)
+    end)
+    toggle(c, "JumpPower (กระโดดสูง)", false, 3, function(v)
         Hub.Flags.Jump = v
         applyJump(v)
-    end })
-SM1:Slider({ Name = "ความสูงกระโดด", Min = 50, Max = 500, Step = 1, Default = 50, Suffix = "",
-    Callback = function(v)
+    end)
+    slider(c, "ความสูงกระโดด", 50, 500, 50, 4, function(v)
         Hub.Opts.JumpPower = v
         if Hub.Flags.Jump then applyJump(true) end
-    end })
-SM1:Slider({ Name = "FOV (มองกว้าง)", Min = 70, Max = 120, Step = 1, Default = 70, Suffix = "",
-    Callback = function(v)
+    end)
+    slider(c, "FOV (มองกว้าง)", 70, 120, 70, 5, function(v)
         Hub.Opts.Fov = v
         local cam = workspace.CurrentCamera
         if cam then cam.FieldOfView = v end
-    end })
-SM1:Button({ Name = "รีเซ็ตค่าปกติ", Desc = "วิ่ง 16 / กระโดด 50 / FOV 70", Callback = function()
-    Hub.Flags.Speed = false
-    Hub.Flags.Jump = false
-    applyWalk(false)
-    applyJump(false)
-    local cam = workspace.CurrentCamera
-    if cam then cam.FieldOfView = 70 end
-    Hub.Opts.WalkSpeed = 16
-    Hub.Opts.JumpPower = 50
-    Hub.Opts.Fov = 70
-    UI:Notify({ Title = "MISC", Text = "รีเซ็ตค่าตัวละครเป็นปกติแล้ว", Duration = 3 })
-end })
+    end)
+    button(c, "รีเซ็ตค่าปกติ", 6, function()
+        Hub.Flags.Speed = false
+        Hub.Flags.Jump = false
+        applyWalk(false)
+        applyJump(false)
+        local cam = workspace.CurrentCamera
+        if cam then cam.FieldOfView = 70 end
+        Hub.Opts.WalkSpeed = 16
+        Hub.Opts.JumpPower = 50
+        Hub.Opts.Fov = 70
+        UI:Notify({ Title = "MISC", Text = "รีเซ็ตค่าตัวละครเป็นปกติแล้ว", Duration = 3 })
+    end)
 
-local SM2 = TabMisc:Section("FPS / กราฟิก")
-SM2:Toggle({ Name = "Boost FPS", Desc = "ปิด Particle/เทรล/แสง + ลดคุณภาพกราฟิกให้ต่ำสุด", Default = false,
-    Callback = function(v)
+    c = card(m2, "FPS / กราฟิก", 1)
+    toggle(c, "Boost FPS", false, 1, function(v)
         Hub.Flags.FpsBoost = v
         task.spawn(function()
             applyFpsBoost(v)
             UI:Notify({ Title = "Boost FPS", Text = v and "เปิดแล้ว" or "ปิดแล้ว", Duration = 3 })
         end)
-    end })
-SM2:Toggle({ Name = "Remove Fog", Desc = "ลบหมอก/Atmosphere ทั้งหมด", Default = false,
-    Callback = function(v)
+    end)
+    toggle(c, "Remove Fog", false, 2, function(v)
         Hub.Flags.Fog = v
         applyFog(v)
-    end })
-SM2:Toggle({ Name = "Fullbright", Desc = "สว่างทั้งแมพ มองเห็นชัด", Default = false,
-    Callback = function(v)
+    end)
+    toggle(c, "Fullbright", false, 3, function(v)
         Hub.Flags.Fullbright = v
         applyFullbright(v)
-    end })
+    end)
+    c = card(m2, "อื่นๆ", 2)
+    toggle(c, "Anti AFK", true, 1, function(v) Hub.Flags.AntiAfk = v end)
+    button(c, "ตรวจค่า MISC ปัจจุบัน", 2, function()
+        local hum = getHum()
+        local cam = workspace.CurrentCamera
+        UI:Notify({ Title = "MISC", Duration = 8, Text = string.format(
+            "WalkSpeed: %s (โหมด: %s)\nJumpPower: %s (โหมด: %s)\nFOV: %s\nBoost FPS: %s | Fog: %s | Fullbright: %s\nล่าสุด: %s",
+            tostring(hum and math.floor(hum.WalkSpeed)), tostring(Hub.Flags.Speed),
+            tostring(hum and math.floor(hum.JumpPower)), tostring(Hub.Flags.Jump),
+            tostring(cam and math.floor(cam.FieldOfView)),
+            tostring(Hub.Flags.FpsBoost), tostring(Hub.Flags.Fog), tostring(Hub.Flags.Fullbright),
+            tostring(Hub.Stats.MiscLast or "-")) })
+    end)
 
-local SM3 = TabMisc:Section("อื่นๆ")
-SM3:Toggle({ Name = "Anti AFK", Desc = "กันหลุดจากการไม่ขยับ", Default = true,
-    Callback = function(v) Hub.Flags.AntiAfk = v end })
-SM3:Button({ Name = "ตรวจค่า MISC ปัจจุบัน", Callback = function()
-    local hum = getHum()
-    local cam = workspace.CurrentCamera
-    UI:Notify({ Title = "MISC", Duration = 8, Text = string.format(
-        "WalkSpeed: %s (โหมด: %s)\nJumpPower: %s (โหมด: %s)\nFOV: %s\nBoost FPS: %s | Fog: %s | Fullbright: %s\nล่าสุด: %s",
-        tostring(hum and math.floor(hum.WalkSpeed)), tostring(Hub.Flags.Speed),
-        tostring(hum and math.floor(hum.JumpPower)), tostring(Hub.Flags.Jump),
-        tostring(cam and math.floor(cam.FieldOfView)),
-        tostring(Hub.Flags.FpsBoost), tostring(Hub.Flags.Fog), tostring(Hub.Flags.Fullbright),
-        tostring(Hub.Stats.MiscLast or "-")) })
-end })
+    -- ---------------- SETTING ----------------
+    local g1, g2 = column(pages.Setting, 12), column(pages.Setting, 258)
+    c = card(g1, "INTERFACE", 1)
+    toggle(c, "Notifications", true, 1, function(v) Hub.Opts.Notify = v end)
+    toggle(c, "Show FPS", false, 2, function(v) Hub.Opts.ShowFPS = v end)
 
--- ---------------- loops ----------------
+    c = card(g2, "CONFIG", 1)
+    toggle(c, "Auto Save", true, 1, function(v) Hub.Opts.AutoSave = v end)
+    button(c, "Unload Hub", 2, function() Hub.Stop() end)
+
+    c = card(g2, "KEYBIND", 2)
+    local bindBtn
+    bindBtn = button(c, "เปิด/ปิดเมนู: " .. Hub.Opts.MenuKey.Name, 1, function()
+        Hub.Binding = true
+        bindBtn.Text = "กดปุ่มที่ต้องการ... (Esc = ยกเลิก)"
+        local conn
+        conn = UIS.InputBegan:Connect(function(i, gp)
+            if gp or i.UserInputType ~= Enum.UserInputType.Keyboard then return end
+            conn:Disconnect()
+            if i.KeyCode ~= Enum.KeyCode.Escape then Hub.Opts.MenuKey = i.KeyCode end
+            bindBtn.Text = "เปิด/ปิดเมนู: " .. Hub.Opts.MenuKey.Name
+            task.defer(function() Hub.Binding = false end)
+        end)
+        track(conn)
+    end)
+end
+
+buildUI()
+
+-- ===== ลาก / พับ / ปิด / คีย์ลัด =====
+local dragging, dragStart, startPos
+top.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        dragging, dragStart, startPos = true, i.Position, main.Position
+    end
+end)
+track(UIS.InputChanged:Connect(function(i)
+    if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+        local d = i.Position - dragStart
+        main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+    end
+end))
+track(UIS.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        dragging = false
+    end
+end))
+
+-- ===== resize จากมุมขวาล่าง =====
+local grip = new("TextButton", {
+    Size = UDim2.fromOffset(16, 16), AnchorPoint = Vector2.new(1, 1),
+    Position = UDim2.new(1, -2, 1, -2), BackgroundTransparency = 1,
+    Text = "◢", TextColor3 = T.dim, TextSize = 12, Font = Enum.Font.GothamBold,
+    AutoButtonColor = false, ZIndex = 20,
+}, main)
+
+local resizing, rStart, rSize
+grip.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        resizing, rStart, rSize = true, i.Position, Hub.Opts.MenuSize
+    end
+end)
+track(UIS.InputChanged:Connect(function(i)
+    if resizing and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+        local d = i.Position - rStart
+        local w = math.clamp(rSize.X + d.X, MIN_W, MAX_W)
+        local h = math.clamp(rSize.Y + d.Y, MIN_H, MAX_H)
+        Hub.Opts.MenuSize = Vector2.new(w, h)
+        if not minimized then main.Size = fullSize() end
+    end
+end))
+track(UIS.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        resizing = false
+    end
+end))
+
+minBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    body.Visible = not minimized
+    grip.Visible = not minimized
+    minBtn.Text = minimized and "+" or "–"
+    tween(main, { Size = minimized and UDim2.fromOffset(Hub.Opts.MenuSize.X, 40) or fullSize() }, 0.25)
+end)
+
+closeBtn.MouseButton1Click:Connect(function() Hub.Stop() end)
+
+track(UIS.InputBegan:Connect(function(i, gp)
+    if gp or Hub.Binding then return end
+    if i.KeyCode == Hub.Opts.MenuKey then
+        main.Visible = not main.Visible
+    end
+end))
+
+-- ===== ลูกลอย (ประกาศครั้งเดียว) =====
+local float = new("TextButton", {
+    Size = UDim2.fromOffset(44, 44), Position = UDim2.new(0, 16, 0.5, -22),
+    BackgroundColor3 = T.bg, BorderSizePixel = 0, AutoButtonColor = false,
+    Text = "M", TextColor3 = T.text, TextSize = 18, Font = Enum.Font.GothamBold, ZIndex = 50,
+}, gui)
+corner(float, 22); stroke(float)
+
+local fDrag, fStart, fPos, fMoved = false, nil, nil, false
+float.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        fDrag, fStart, fPos, fMoved = true, i.Position, float.Position, false
+    end
+end)
+track(UIS.InputChanged:Connect(function(i)
+    if fDrag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+        local d = i.Position - fStart
+        if math.abs(d.X) + math.abs(d.Y) > 4 then fMoved = true end
+        float.Position = UDim2.new(fPos.X.Scale, fPos.X.Offset + d.X, fPos.Y.Scale, fPos.Y.Offset + d.Y)
+    end
+end))
+track(UIS.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        if fDrag and not fMoved then
+            main.Visible = not main.Visible
+        end
+        fDrag = false
+    end
+end))
+
+-- ===== Notify มุมขวาล่าง =====
+local notifyHolder = new("Frame", {
+    Size = UDim2.fromOffset(280, 0), AnchorPoint = Vector2.new(1, 1),
+    Position = UDim2.new(1, -16, 1, -16), BackgroundTransparency = 1,
+    AutomaticSize = Enum.AutomaticSize.Y, ZIndex = 200,
+}, gui)
+new("UIListLayout", {
+    Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder,
+    VerticalAlignment = Enum.VerticalAlignment.Bottom,
+}, notifyHolder)
+
+local notifyOrder = 0
+function UI:Notify(o)
+    if type(o) ~= "table" or Hub.Opts.Notify == false then return end
+    notifyOrder = notifyOrder + 1
+    local card = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundColor3 = T.panel, BorderSizePixel = 0, LayoutOrder = -notifyOrder,
+        ZIndex = 200,
+    }, notifyHolder)
+    corner(card, 8); stroke(card)
+    new("UIPadding", {
+        PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8),
+        PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10),
+    }, card)
+    new("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }, card)
+    local title = label(card, tostring(o.Title or ""), UDim2.new(1, 0, 0, 14), nil, T.text, Enum.Font.GothamBold)
+    title.ZIndex = 201
+    local text = label(card, tostring(o.Text or ""), UDim2.new(1, 0, 0, 0), nil, T.dim, Enum.Font.Gotham)
+    text.AutomaticSize = Enum.AutomaticSize.Y
+    text.TextWrapped = true
+    text.ZIndex = 201
+
+    local dur = tonumber(o.Duration) or 3
+    task.delay(dur, function()
+        if card and card.Parent then
+            tween(card, { BackgroundTransparency = 1 }, 0.3)
+            task.wait(0.3)
+            pcall(function() card:Destroy() end)
+        end
+    end)
+end
+
+-- ===== กัน UI หายตอนเปลี่ยนฉาก/คัทซีน =====
+local function rebuildGuiIfMissing()
+    if gui and gui.Parent then return end
+    gui = new("ScreenGui", {
+        Name = "MouSeyHub", ResetOnSpawn = false,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling, IgnoreGuiInset = true,
+    }, getGuiParent())
+    main.Parent = gui
+    float.Parent = gui
+    notifyHolder.Parent = gui
+end
+task.spawn(function()
+    while Hub.Running do
+        pcall(rebuildGuiIfMissing)
+        task.wait(1)
+    end
+end)
+
+-- ===== intro : คำว่า MouSey กลางจอ แล้วเปิดเมนู =====
+local function playIntro()
+    local introLabel = new("TextLabel", {
+        Size = UDim2.fromOffset(600, 120), Position = UDim2.fromScale(0.5, 0.5),
+        AnchorPoint = Vector2.new(0.5, 0.5), BackgroundTransparency = 1,
+        Text = "MouSey", TextColor3 = T.text, TextSize = 100, Font = Enum.Font.GothamBold,
+        TextTransparency = 1, ZIndex = 100,
+    }, gui)
+    local scale = new("UIScale", { Scale = 0.8 }, introLabel)
+
+    main.Visible = false
+    float.Visible = false
+
+    tween(introLabel, { TextTransparency = 0 }, 1)
+    tween(scale, { Scale = 1 }, 0.5)
+    task.wait(2)
+    tween(introLabel, { TextTransparency = 1 }, 1)
+    tween(scale, { Scale = 1.1 }, 0.4)
+    task.wait(0.45)
+    introLabel:Destroy()
+
+    main.Visible = true
+    float.Visible = true
+    local mainScale = main:FindFirstChildOfClass("UIScale") or new("UIScale", { Scale = 0.9 }, main)
+    mainScale.Scale = 0.9
+    tween(mainScale, { Scale = 1 }, 0.35)
+end
+
+-- ===== เริ่มต้น =====
+selectTab("Farm")
+syncKnown()
+task.spawn(function()
+    pcall(playIntro)
+    UI:Notify({ Title = "2K Hub", Text = "FARM: Auto Throw + Cycle | TRAIN / SHOP / SELL / MISC", Duration = 6 })
+end)
+
+-- ================= Stop =================
+function Hub.Stop()
+    Hub.Running = false
+    for k in pairs(Hub.Flags) do Hub.Flags[k] = false end
+    pcall(function() Remotes.Invoke("Training_Stop") end)
+    pcall(function() applyFpsBoost(false) end)
+    pcall(function() applyFog(false) end)
+    pcall(function() applyFullbright(false) end)
+    pcall(function() applyWalk(false) end)
+    pcall(function() applyJump(false) end)
+    pcall(function() local cam = workspace.CurrentCamera; if cam then cam.FieldOfView = 70 end end)
+    if ThrowMeter then
+        ThrowMeter.TestAutoTap = nil
+        if Hub.OrigRun then ThrowMeter.Run = Hub.OrigRun end
+    end
+    if Hub.OrigInvoke then Remotes.Invoke = Hub.OrigInvoke end
+    for _, c in ipairs(Hub.Conns) do pcall(function() c:Disconnect() end) end
+    Hub.Conns = {}
+    pcall(function() gui:Destroy() end)
+end
+
+-- ================= loops (logic เดิม) =================
 
 -- CYCLE loop : โยน N ครั้ง -> เทรน M วิ
 task.spawn(function()
@@ -731,7 +1195,7 @@ task.spawn(function()
                         Hub.CyclePhase = "Train"
                         Hub.CycleTrainEnd = os.clock() + math.max(5, math.floor(O.CycleTrainSecs or 30))
                         Hub.Stats.CycleLast = string.format("โยนครบ %d -> ไปเทรน %d วิ", need, O.CycleTrainSecs)
-                        if UI then UI:Notify({ Title = "Cycle", Text = string.format("โยนครบ %d ครั้ง → เทรน %d วิ", need, O.CycleTrainSecs), Duration = 4 }) end
+                        UI:Notify({ Title = "Cycle", Text = string.format("โยนครบ %d ครั้ง → เทรน %d วิ", need, O.CycleTrainSecs), Duration = 4 })
                     else
                         Hub.Flags.AutoThrow = true
                     end
@@ -747,23 +1211,14 @@ task.spawn(function()
                         Hub.CycleDone = Hub.CycleDone + 1
                         local rounds = math.floor(O.CycleRounds or 0)
                         Hub.Stats.CycleLast = string.format("รอบที่ %d เสร็จ -> กลับไปโยน", Hub.CycleDone)
-                        if UI then UI:Notify({ Title = "Cycle", Text = string.format("เทรนครบ %d วิ → กลับไปโยน %d ครั้ง (รอบที่ %d)", O.CycleTrainSecs, need, Hub.CycleDone), Duration = 4 }) end
+                        UI:Notify({ Title = "Cycle", Text = string.format("เทรนครบ %d วิ → กลับไปโยน %d ครั้ง (รอบที่ %d)", O.CycleTrainSecs, need, Hub.CycleDone), Duration = 4 })
                         if rounds > 0 and Hub.CycleDone >= rounds then
                             Hub.Flags.Cycle = false
                             Hub.Flags.AutoThrow = false
                             Hub.Stats.CycleLast = string.format("จบครบ %d รอบ", Hub.CycleDone)
-                            if UI then UI:Notify({ Title = "Cycle เสร็จ", Text = string.format("ทำครบ %d รอบแล้ว หยุดอัตโนมัติ", Hub.CycleDone), Duration = 8 }) end
+                            UI:Notify({ Title = "Cycle เสร็จ", Text = string.format("ทำครบ %d รอบแล้ว หยุดอัตโนมัติ", Hub.CycleDone), Duration = 8 })
                         end
                     end
-                end
-                if UI and UI.SetStatus then
-                    local s
-                    if Hub.CyclePhase == "Throw" then
-                        s = string.format("Cycle โยน %d/%d (รอบที่ %d)", Hub.CycleThrown, need, Hub.CycleDone + 1)
-                    else
-                        s = string.format("Cycle เทรน เหลือ %d วิ (รอบที่ %d)", math.max(0, math.floor((Hub.CycleTrainEnd or 0) - os.clock())), Hub.CycleDone + 1)
-                    end
-                    pcall(function() UI:SetStatus(s) end)
                 end
             end)
         end
@@ -771,6 +1226,7 @@ task.spawn(function()
     end
 end)
 
+-- TRAIN loop
 task.spawn(function()
     while Hub.Running do
         if Hub.Flags.AutoTrain then
@@ -816,6 +1272,7 @@ task.spawn(function()
     end
 end)
 
+-- THROW loop
 task.spawn(function()
     while Hub.Running do
         if Hub.Flags.AutoThrow and ThrowCtrl and not Hub.InTrain then
@@ -836,6 +1293,7 @@ task.spawn(function()
     end
 end)
 
+-- EQUIP loop
 task.spawn(function()
     while Hub.Running do
         if Hub.Flags.AutoEquip then
@@ -848,6 +1306,7 @@ task.spawn(function()
     end
 end)
 
+-- SHOP loop
 task.spawn(function()
     while Hub.Running do
         if Hub.Flags.AutoFood and FoodsConfig and type(FoodsConfig.List) == "table" then
@@ -915,6 +1374,7 @@ task.spawn(function()
     end
 end)
 
+-- SELL loop
 task.spawn(function()
     while Hub.Running do
         if Hub.Flags.AutoSell then pcall(function() sellBatch(false) end) end
@@ -950,17 +1410,9 @@ task.spawn(function()
 end)
 
 -- Anti AFK
-do
-    local conn = LP.Idled:Connect(function()
-        if not Hub.Flags.AntiAfk then return end
-        local vu = game:GetService("VirtualUser")
-        vu:CaptureController()
-        vu:ClickButton2(Vector2.new())
-    end)
-    table.insert(Hub.Conns, conn)
-end
-
-syncKnown()
-UI:AddSettingsTab()
-UI:Notify({ Title = "2K Hub", Text = "FARM: Auto Throw + Cycle | TRAIN / SHOP / SELL / MISC", Duration = 6 })
-UI:Toggle(true)
+track(LP.Idled:Connect(function()
+    if not Hub.Flags.AntiAfk then return end
+    local vu = game:GetService("VirtualUser")
+    vu:CaptureController()
+    vu:ClickButton2(Vector2.new())
+end))
