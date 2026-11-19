@@ -1,0 +1,966 @@
+-- 2K Hub | Throw Food For Animals : FARM(Throw perfect + Cycle โยน/เทรน) + Auto Equip Best + TRAIN(x2) + SHOP + SELL + MISC
+if getgenv().TwoK then pcall(getgenv().TwoK.Stop) end
+
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local HJS = game:GetService("HttpService")
+local Lighting = game:GetService("Lighting")
+local LP = Players.LocalPlayer
+local PC = LP.PlayerScripts.Client.Controllers
+
+local Hub = {
+    Running = true,
+    Flags = { AutoThrow = false, AutoTrain = false, Cycle = false, AutoEquip = false, AutoFood = false, AutoBar = false, AutoPlot = false, AutoSell = false,
+              Speed = false, Jump = false, Fov = false, FpsBoost = false, Fog = false, Fullbright = false, AntiAfk = true },
+    Conns = {},
+    Known = {},
+    InTrain = false,
+    Throwing = false,
+    CyclePhase = "Throw",
+    CycleThrown = 0,
+    CycleTrainEnd = 0,
+    CycleDone = 0,
+    Opts = {
+        TapTime = 1.085, ThrowDelay = 2, DriftRadius = 8, EquipDelay = 5,
+        CycleThrows = 5, CycleTrainSecs = 30, CycleRounds = 0,
+        Reserve = 0, ShopDelay = 1.5, FoodMode = "แพงสุดที่ไหว", AutoEquipFood = true,
+        SellMode = "จำกัด Rarity", SellRarity = "Rare", SellPlaced = false,
+        SellEvery = 3, SellStep = 0.15,
+        WalkSpeed = 16, JumpPower = 50, Fov = 70,
+    },
+    Stats = { Throws = 0, Fails = 0, Taps = 0, Equips = 0, Food = 0, Bar = 0, Plot = 0,
+              Sold = 0, SellMoney = 0, Last = "-", TrainLast = "-", ShopLast = "-", EquipLast = "-", SellLast = "-", CycleLast = "-", MiscLast = "-" },
+}
+getgenv().TwoK = Hub
+
+local function tryReq(m)
+    local ok, r = pcall(require, m)
+    if ok and type(r) == "table" then return r end
+    return nil
+end
+local function enc(v)
+    local ok, s = pcall(function() return HJS:JSONEncode(v) end)
+    return ok and s or tostring(v)
+end
+
+local Remotes     = tryReq(RS.Shared.Remotes) or error("Remotes module missing")
+local AreaUtil    = tryReq(RS.Shared.AreaUtil)
+local FoodsConfig = tryReq(RS.Config.FoodsConfig)
+local StandsConf  = tryReq(RS.Config.StandsConfig)
+local FenceConfig = tryReq(RS.Config.FenceConfig)
+local AE          = tryReq(RS.Config.AnimalEconomy)
+local Rar         = tryReq(RS.Config.RarityConfig)
+local Balance     = tryReq(RS.Shared.BalanceCurve)
+local Mut         = tryReq(RS.Shared.Mutations)
+local NF          = tryReq(RS.Shared.NumberFormat)
+local ThrowMeter  = tryReq(PC.ThrowMeter)
+local ThrowCtrl   = tryReq(PC.ThrowController)
+local DataCtrl    = tryReq(PC.DataController)
+
+local UI = nil
+
+Hub.LaunchPos = Vector3.new(0, 2.5, -45)
+if AreaUtil and AreaUtil.GetLaunchPosition then
+    pcall(function() Hub.LaunchPos = AreaUtil.GetLaunchPosition() end)
+end
+Hub.TrainPos = Vector3.new(-66, 2.5, -8)
+
+-- ================= helpers =================
+local RARITY_ORDER = { "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Secret", "Divine", "Celestial", "Eternal", "Cosmic", "Supreme", "Sovereign" }
+
+local function fmtMoney(n)
+    if NF and NF.Money then local ok, s = pcall(NF.Money, n); if ok and s then return s end end
+    return tostring(n)
+end
+local function fmtPS(n)
+    if NF and NF.PerSecond then local ok, s = pcall(NF.PerSecond, n); if ok and s then return s end end
+    return tostring(n)
+end
+local function data()
+    if not DataCtrl then return nil end
+    local ok, d = pcall(function() return DataCtrl.GetData() end)
+    if ok and type(d) == "table" then return d end
+    return nil
+end
+local function money()
+    local d = data()
+    return (d and tonumber(d.Money)) or 0
+end
+local function bestIncome()
+    local ok, v = pcall(function() return LP:GetAttribute("BestIncome") end)
+    return (ok and tonumber(v)) or 0
+end
+local function rIdx(name)
+    if not name then return nil end
+    if Rar and Rar.Get then
+        local ok, r = pcall(Rar.Get, name)
+        if ok and type(r) == "table" and r.Index then return tonumber(r.Index) end
+    end
+    for i, n in ipairs(RARITY_ORDER) do if n == name then return i end end
+    return nil
+end
+local function getSpot()
+    local lpp = workspace:FindFirstChild("LocalPlotProps")
+    local ta = lpp and lpp:FindFirstChild("TrainingArea")
+    return ta and ta:FindFirstChild("TrainingSpot")
+end
+local function getHRP()
+    local c = LP.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+local function getHum()
+    local c = LP.Character
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+local function warp(pos)
+    local hrp = getHRP()
+    if not hrp then return false end
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+    return true
+end
+local function animalsList()
+    local d = data()
+    local out = {}
+    if not d or type(d.Animals) ~= "table" then return out end
+    local best = bestIncome()
+    for id, a in pairs(d.Animals) do
+        local e = AE and AE.Get(a.ModelName) or nil
+        local inc = 0
+        if Mut then local ok, v = pcall(Mut.IncomeOf, a, best); if ok then inc = tonumber(v) or 0 end end
+        local price = 0
+        if Mut then local ok, v = pcall(Mut.SellPrice, a, best); if ok then price = tonumber(v) or 0 end end
+        out[#out + 1] = {
+            Id = id, Model = a.ModelName, Placed = (a.Placed and true or false),
+            Mutation = a.Mutation, Income = inc, Price = price,
+            Rarity = (e and e.Rarity) or nil, RIdx = rIdx(e and e.Rarity),
+        }
+    end
+    table.sort(out, function(x, y) return (x.Income or 0) > (y.Income or 0) end)
+    return out
+end
+local function syncKnown()
+    local d = data()
+    local new = {}
+    if not d or type(d.Animals) ~= "table" then return new end
+    for id, a in pairs(d.Animals) do
+        if not Hub.Known[id] then
+            Hub.Known[id] = true
+            new[#new + 1] = { Id = id, Entry = a }
+        end
+    end
+    return new
+end
+local function slotsCount()
+    local d = data()
+    local lvl = (d and tonumber(d.FenceLevel)) or 0
+    if FenceConfig and FenceConfig.SlotsFor then
+        local ok, s = pcall(FenceConfig.SlotsFor, lvl)
+        if ok and tonumber(s) then return tonumber(s) end
+    end
+    return 14
+end
+
+-- ================= Always Perfect meter =================
+if ThrowMeter and type(ThrowMeter.Run) == "function" then
+    Hub.OrigRun = ThrowMeter.Run
+    ThrowMeter.Run = function(self, ...)
+        local a = table.pack(...)
+        ThrowMeter.TestAutoTap = Hub.Opts.TapTime
+        local ok, v = pcall(Hub.OrigRun, self, table.unpack(a, 1, a.n))
+        if not ok then return 0.99 end
+        return v
+    end
+end
+
+-- ================= แจ้งสถานะอัตโนมัติทุกครั้งที่โยน =================
+if type(Remotes.Invoke) == "function" then
+    Hub.OrigInvoke = Remotes.Invoke
+    Remotes.Invoke = function(name, ...)
+        local a = table.pack(...)
+        local r = table.pack(Hub.OrigInvoke(name, table.unpack(a, 1, a.n)))
+        local res = r[1]
+        pcall(function()
+            if name == "Throw_Resolve" and type(res) == "table" then
+                if res.Ok then
+                    Hub.Stats.Throws = Hub.Stats.Throws + 1
+                    if Hub.Flags.Cycle and Hub.CyclePhase == "Throw" then
+                        Hub.CycleThrown = Hub.CycleThrown + 1
+                    end
+                    local best = bestIncome()
+                    local newcomers = syncKnown()
+                    local mut, inc = nil, nil
+                    for _, n in ipairs(newcomers) do
+                        local v = 0
+                        if Mut then local okI, iv = pcall(Mut.IncomeOf, n.Entry, best); if okI then v = tonumber(iv) or 0 end end
+                        if inc == nil or v > inc then inc = v; mut = n.Entry.Mutation end
+                    end
+                    if inc == nil then
+                        local e = AE and AE.Get(res.ModelName)
+                        inc = (e and tonumber(e.Income)) or 0
+                    end
+                    local txt = string.format("%s%s  |  %s studs  |  %s",
+                        tostring(res.ModelName or "?"),
+                        mut and (" [" .. tostring(mut) .. "]") or "",
+                        string.format("%.0f", tonumber(res.Distance) or 0),
+                        fmtPS(inc or 0))
+                    Hub.Stats.Last = txt
+                    if UI then UI:Notify({ Title = "Throw #" .. tostring(Hub.Stats.Throws), Text = txt, Duration = 3 }) end
+                else
+                    Hub.Stats.Fails = Hub.Stats.Fails + 1
+                    Hub.Stats.Last = "FAIL: " .. tostring(res.Reason)
+                    if UI then UI:Notify({ Title = "Throw พลาด", Text = tostring(res.Reason), Duration = 2 }) end
+                end
+            elseif name == "Throw_Start" and type(res) == "table" and not res.Ok then
+                Hub.Stats.Fails = Hub.Stats.Fails + 1
+                Hub.Stats.Last = "START FAIL: " .. tostring(res.Reason)
+            end
+        end)
+        return table.unpack(r, 1, r.n)
+    end
+end
+
+-- ================= Auto x2 =================
+do
+    local ok, ev = pcall(function() return Remotes.Event("Training_Bonus") end)
+    if ok and ev then
+        table.insert(Hub.Conns, ev.OnClientEvent:Connect(function(id)
+            if not (Hub.Flags.AutoTrain or Hub.Flags.Cycle) then return end
+            local okTap, r = pcall(function() return Remotes.Invoke("Training_TapBonus", id) end)
+            if okTap and type(r) == "table" and r.Ok then
+                Hub.Stats.Taps = Hub.Stats.Taps + 1
+                Hub.Stats.TrainLast = string.format("x2 ok (id %s, +%s reps)", tostring(id), tostring(r.ExtraReps))
+            else
+                Hub.Stats.TrainLast = "x2 fail: " .. enc(r)
+            end
+        end))
+    end
+end
+
+-- ================= Auto Equip Best =================
+local function equipBest()
+    local d = data()
+    if not d then return "no data" end
+    local slots = slotsCount()
+    local list = animalsList()
+    local placed, unplaced = {}, {}
+    for _, a in ipairs(list) do
+        if a.Placed then placed[#placed + 1] = a else unplaced[#unplaced + 1] = a end
+    end
+    local equips, swaps = 0, 0
+    local free = slots - #placed
+    local ui = 1
+    while free > 0 and unplaced[ui] do
+        local ok, r = pcall(function() return Remotes.Invoke("Plot_EquipAnimal", unplaced[ui].Id) end)
+        if ok and type(r) == "table" and r.Ok then
+            equips = equips + 1
+            free = free - 1
+            ui = ui + 1
+        else
+            break
+        end
+        task.wait(0.05)
+    end
+    table.sort(placed, function(x, y) return (x.Income or 0) < (y.Income or 0) end)
+    for _, worst in ipairs(placed) do
+        if not unplaced[ui] then break end
+        if (unplaced[ui].Income or 0) > (worst.Income or 0) then
+            local ok1, r1 = pcall(function() return Remotes.Invoke("Plot_PickUpAnimal", worst.Id) end)
+            if ok1 and type(r1) == "table" and r1.Ok then
+                local ok2, r2 = pcall(function() return Remotes.Invoke("Plot_EquipAnimal", unplaced[ui].Id) end)
+                if ok2 and type(r2) == "table" and r2.Ok then
+                    swaps = swaps + 1
+                    ui = ui + 1
+                else
+                    pcall(function() Remotes.Invoke("Plot_EquipAnimal", worst.Id) end)
+                    break
+                end
+            else
+                break
+            end
+        else
+            break
+        end
+        task.wait(0.05)
+    end
+    if equips + swaps > 0 then
+        local after = 0
+        for _, a in ipairs(animalsList()) do if a.Placed then after = after + (a.Income or 0) end end
+        return string.format("equip %d, สลับ %d | รวม %s | %d/%d ช่อง", equips, swaps, fmtPS(after), math.min(#placed + equips, slots), slots)
+    end
+    return string.format("ดีสุดอยู่แล้ว | %d/%d ช่อง", #placed, slots)
+end
+
+-- ================= Auto Sell =================
+local function collectSellTargets()
+    local out = {}
+    local maxIdx = rIdx(Hub.Opts.SellRarity) or 0
+    for _, a in ipairs(animalsList()) do
+        local keep = false
+        if a.Placed and not Hub.Opts.SellPlaced then keep = true end
+        if not keep and Hub.Opts.SellMode ~= "ขายทั้งหมด" then
+            if (a.RIdx or 0) > maxIdx then keep = true end
+        end
+        if not keep then out[#out + 1] = a end
+    end
+    table.sort(out, function(x, y) return (x.Price or 0) < (y.Price or 0) end)
+    return out
+end
+
+local function sellBatch(notify)
+    local targets = collectSellTargets()
+    if #targets == 0 then
+        if notify and UI then UI:Notify({ Title = "Auto Sell", Text = "ไม่มีสัตว์ที่ตรงเงื่อนไข", Duration = 3 }) end
+        return 0, 0
+    end
+    local count, gained = 0, 0
+    for _, a in ipairs(targets) do
+        if not Hub.Running then break end
+        local ok, r = pcall(function() return Remotes.Invoke("Plot_SellAnimal", a.Id) end)
+        if ok and type(r) == "table" and r.Ok then
+            count = count + 1
+            gained = gained + (tonumber(r.Money) or 0)
+        end
+        task.wait(Hub.Opts.SellStep or 0.15)
+    end
+    Hub.Stats.Sold = Hub.Stats.Sold + count
+    Hub.Stats.SellMoney = Hub.Stats.SellMoney + gained
+    if count > 0 then
+        Hub.Stats.SellLast = string.format("ขาย %d ตัว ได้ %s", count, fmtMoney(gained))
+        if UI then UI:Notify({ Title = "Auto Sell", Text = Hub.Stats.SellLast, Duration = 3 }) end
+    end
+    return count, gained
+end
+
+-- ================= MISC : player / graphics =================
+local origLight = { Saved = false, Atmosphere = {} }
+local fpsRemoved = {}
+local fpsSavedQuality = nil
+
+local function saveLight()
+    if origLight.Saved then return end
+    origLight.Saved = true
+    origLight.FogEnd = Lighting.FogEnd
+    origLight.FogStart = Lighting.FogStart
+    origLight.FogColor = Lighting.FogColor
+    origLight.Brightness = Lighting.Brightness
+    origLight.Ambient = Lighting.Ambient
+    origLight.OutdoorAmbient = Lighting.OutdoorAmbient
+    origLight.GlobalShadows = Lighting.GlobalShadows
+    origLight.ClockTime = Lighting.ClockTime
+    for _, a in ipairs(Lighting:GetChildren()) do
+        if a:IsA("Atmosphere") then
+            origLight.Atmosphere[a] = { Density = a.Density, Haze = a.Haze }
+        end
+    end
+end
+
+local function applyFog(on)
+    saveLight()
+    for _, a in ipairs(Lighting:GetChildren()) do
+        if a:IsA("Atmosphere") then
+            local o = origLight.Atmosphere[a]
+            if on then
+                a.Density = 0
+                a.Haze = 0
+            elseif o then
+                a.Density = o.Density
+                a.Haze = o.Haze
+            end
+        end
+    end
+    if on then
+        Lighting.FogEnd = 1000000
+        Lighting.FogStart = 1000000
+        Lighting.FogColor = Color3.fromRGB(0, 0, 0)
+    else
+        Lighting.FogEnd = origLight.FogEnd
+        Lighting.FogStart = origLight.FogStart
+        Lighting.FogColor = origLight.FogColor
+    end
+end
+
+local function applyFullbright(on)
+    saveLight()
+    if on then
+        Lighting.Brightness = 3
+        Lighting.Ambient = Color3.fromRGB(200, 200, 200)
+        Lighting.OutdoorAmbient = Color3.fromRGB(200, 200, 200)
+        Lighting.GlobalShadows = false
+        Lighting.ClockTime = 14
+    else
+        Lighting.Brightness = origLight.Brightness
+        Lighting.Ambient = origLight.Ambient
+        Lighting.OutdoorAmbient = origLight.OutdoorAmbient
+        Lighting.GlobalShadows = origLight.GlobalShadows
+        Lighting.ClockTime = origLight.ClockTime
+    end
+end
+
+local EFFECT_CLASSES = {
+    ParticleEmitter = true, Smoke = true, Fire = true, Sparkles = true,
+    Trail = true, Beam = true, Explosion = true,
+}
+
+local function applyFpsBoost(on)
+    if on then
+        local n = 0
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if EFFECT_CLASSES[d.ClassName] then
+                local okE, en = pcall(function() return d.Enabled end)
+                if okE and en then
+                    pcall(function() d.Enabled = false end)
+                    fpsRemoved[d] = true
+                    n = n + 1
+                end
+            end
+        end
+        pcall(function()
+            if not fpsSavedQuality then fpsSavedQuality = settings().Rendering.QualityLevel end
+            settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+        end)
+        pcall(function() Lighting.GlobalShadows = false end)
+        Hub.Stats.MiscLast = "Boost FPS: ปิดเอฟเฟกต์ " .. n .. " จุด + คุณภาพต่ำสุด"
+    else
+        local n = 0
+        for inst in pairs(fpsRemoved) do
+            if inst and inst.Parent then pcall(function() inst.Enabled = true end); n = n + 1 end
+        end
+        fpsRemoved = {}
+        pcall(function()
+            if fpsSavedQuality then settings().Rendering.QualityLevel = fpsSavedQuality end
+        end)
+        Hub.Stats.MiscLast = "Boost FPS: คืนค่า " .. n .. " เอฟเฟกต์"
+    end
+end
+
+local function applyWalk(on)
+    local hum = getHum()
+    if not hum then return end
+    hum.WalkSpeed = on and Hub.Opts.WalkSpeed or 16
+end
+local function applyJump(on)
+    local hum = getHum()
+    if not hum then return end
+    if on then
+        pcall(function() hum.UseJumpPower = true end)
+        hum.JumpPower = Hub.Opts.JumpPower
+    else
+        hum.JumpPower = 50
+    end
+end
+
+-- ================= UI =================
+UI = loadstring(game:HttpGet("https://ai.zeinstore.xyz/prism.luau"))()
+Hub.UI = UI
+
+function Hub.Stop()
+    Hub.Running = false
+    for k in pairs(Hub.Flags) do Hub.Flags[k] = false end
+    pcall(function() Remotes.Invoke("Training_Stop") end)
+    pcall(function() applyFpsBoost(false) end)
+    pcall(function() applyFog(false) end)
+    pcall(function() applyFullbright(false) end)
+    pcall(function() applyWalk(false) end)
+    pcall(function() applyJump(false) end)
+    pcall(function() local cam = workspace.CurrentCamera; if cam then cam.FieldOfView = 70 end end)
+    if ThrowMeter then
+        ThrowMeter.TestAutoTap = nil
+        if Hub.OrigRun then ThrowMeter.Run = Hub.OrigRun end
+    end
+    if Hub.OrigInvoke then Remotes.Invoke = Hub.OrigInvoke end
+    for _, c in ipairs(Hub.Conns) do pcall(function() c:Disconnect() end) end
+    Hub.Conns = {}
+    pcall(function() UI:Destroy() end)
+end
+
+UI:SetTitle("2K | Throw Food For Animals")
+
+-- ---------------- FARM ----------------
+local TabFarm = UI:Tab("FARM")
+
+-- Section 1 : Auto Throw Perfect
+local SF = TabFarm:Section("AUTO THROW (PERFECT)")
+SF:Toggle({ Name = "Auto Throw", Desc = "วาร์ปจุดโยน + โยน PERFECT วนซ้ำ (แจ้งผลทุกครั้ง)", Default = false,
+    Callback = function(v)
+        Hub.Flags.AutoThrow = v
+        if v then
+            if not Hub.Flags.Cycle then
+                Hub.Flags.AutoTrain = false
+                Hub.InTrain = false
+                pcall(function() Remotes.Invoke("Training_Stop") end)
+            end
+        end
+    end })
+SF:Slider({ Name = "Delay (s)", Min = 1.5, Max = 6, Step = 0.1, Default = 2, Suffix = "s",
+    Callback = function(v) Hub.Opts.ThrowDelay = v end })
+SF:Button({ Name = "วาร์ปไปจุดโยน", Callback = function() warp(Hub.LaunchPos) end })
+
+-- Section 2 : Cycle โยน -> เทรน (อยู่ด้านล่าง Auto Throw)
+local SC = TabFarm:Section("CYCLE : โยน N ครั้ง -> เทรน M วินาที")
+SC:Toggle({ Name = "เปิด Cycle (โยน ↔ เทรน)", Desc = "สลับอัตโนมัติ: โยนครบ N ครั้ง แล้วไปเทรน M วินาที วนซ้ำ", Default = false,
+    Callback = function(v)
+        Hub.Flags.Cycle = v
+        Hub.CyclePhase = "Throw"
+        Hub.CycleThrown = 0
+        Hub.CycleDone = 0
+        Hub.CycleTrainEnd = 0
+        if v then
+            Hub.InTrain = false
+            pcall(function() Remotes.Invoke("Training_Stop") end)
+            Hub.Stats.CycleLast = string.format("เริ่มรอบ: โยน %d ครั้ง", Hub.Opts.CycleThrows)
+            UI:Notify({ Title = "Cycle", Text = string.format("เริ่มแล้ว: โยน %d ครั้ง -> เทรน %d วิ",
+                Hub.Opts.CycleThrows, Hub.Opts.CycleTrainSecs), Duration = 4 })
+        else
+            Hub.Flags.AutoThrow = false
+            Hub.Flags.AutoTrain = false
+            Hub.InTrain = false
+            pcall(function() Remotes.Invoke("Training_Stop") end)
+            Hub.Stats.CycleLast = "ปิด Cycle"
+            pcall(function() UI:SetStatus("Cycle: ปิด") end)
+        end
+    end })
+SC:Slider({ Name = "โยนกี่ครั้ง", Min = 1, Max = 50, Step = 1, Default = 5, Suffix = " ครั้ง",
+    Callback = function(v) Hub.Opts.CycleThrows = math.floor(v) end })
+SC:Slider({ Name = "เทรนกี่วินาที", Min = 5, Max = 300, Step = 5, Default = 30, Suffix = " วิ",
+    Callback = function(v) Hub.Opts.CycleTrainSecs = math.floor(v) end })
+SC:Slider({ Name = "จำนวนรอบ (0 = ไม่จำกัด)", Min = 0, Max = 100, Step = 1, Default = 0, Suffix = " รอบ",
+    Callback = function(v) Hub.Opts.CycleRounds = math.floor(v) end })
+SC:Button({ Name = "ดูสถานะ Cycle", Callback = function()
+    local phase = Hub.CyclePhase
+    local left = math.max(0, math.floor((Hub.CycleTrainEnd or 0) - os.clock()))
+    local lines = {
+        string.format("สถานะ: %s", Hub.Flags.Cycle and ("เปิด (" .. tostring(phase) .. ")") or "ปิด"),
+        string.format("โยนแล้วรอบนี้: %d / %d", Hub.CycleThrown, Hub.Opts.CycleThrows),
+        string.format("เทรนเหลือ: %d วิ (รอบละ %d วิ)", left, Hub.Opts.CycleTrainSecs),
+        string.format("รอบที่ทำครบ: %d %s", Hub.CycleDone,
+            Hub.Opts.CycleRounds > 0 and ("/ " .. Hub.Opts.CycleRounds) or "(ไม่จำกัด)"),
+        string.format("โยนรวม: %d (พลาด %d) | x2 ที่กด: %d", Hub.Stats.Throws, Hub.Stats.Fails, Hub.Stats.Taps),
+        "ล่าสุด: " .. tostring(Hub.Stats.CycleLast),
+    }
+    UI:Notify({ Title = "Cycle โยน ↔ เทรน", Text = table.concat(lines, "\n"), Duration = 10 })
+end })
+
+-- Section 3 : Auto Equip Best
+local SE = TabFarm:Section("AUTO EQUIP BEST (เงิน/วินาที)")
+SE:Toggle({ Name = "Auto Equip Best", Desc = "จัดสัตว์ที่ให้เงิน/วิ สูงสุดลง Plot ให้เอง", Default = false,
+    Callback = function(v) Hub.Flags.AutoEquip = v end })
+SE:Slider({ Name = "เช็กทุกกี่วิ", Min = 2, Max = 30, Step = 1, Default = 5, Suffix = "s",
+    Callback = function(v) Hub.Opts.EquipDelay = v end })
+SE:Button({ Name = "Equip Best เดี๋ยวนี้", Callback = function()
+    task.spawn(function()
+        local msg = equipBest()
+        Hub.Stats.EquipLast = msg
+        UI:Notify({ Title = "Equip Best", Text = msg, Duration = 5 })
+    end)
+end })
+SE:Button({ Name = "ดูอันดับสัตว์ (เงิน/วิ)", Callback = function()
+    local list = animalsList()
+    local lines = {}
+    for i = 1, math.min(#list, 8) do
+        local a = list[i]
+        lines[#lines + 1] = string.format("%d. %s %s%s = %s%s", i, tostring(a.Model),
+            a.Rarity and ("[" .. a.Rarity .. "] ") or "", a.Placed and "(วาง)" or "",
+            fmtPS(a.Income or 0), a.Mutation and (" [" .. a.Mutation .. "]") or "")
+    end
+    if #lines == 0 then lines[1] = "ยังไม่มีสัตว์" end
+    UI:Notify({ Title = string.format("อันดับสัตว์ (%d ตัว)", #list), Text = table.concat(lines, "\n"), Duration = 10 })
+end })
+
+-- ---------------- TRAIN ----------------
+local TabTrain = UI:Tab("TRAIN")
+local ST = TabTrain:Section("AUTO TRAIN + AUTO x2")
+ST:Toggle({ Name = "Auto Train", Desc = "วาร์ปไปจุดเทรน + เริ่มเทรน + กด x2 ให้เองตลอดเวลา", Default = false,
+    Callback = function(v)
+        Hub.Flags.AutoTrain = v
+        Hub.InTrain = false
+        if v then
+            if not Hub.Flags.Cycle then Hub.Flags.AutoThrow = false end
+        else
+            if not Hub.Flags.Cycle then pcall(function() Remotes.Invoke("Training_Stop") end) end
+        end
+    end })
+ST:Slider({ Name = "ระยะหลุดจากจุดเทรน (studs)", Min = 2, Max = 20, Step = 1, Default = 8, Suffix = " studs",
+    Callback = function(v) Hub.Opts.DriftRadius = v end })
+
+-- ---------------- SHOP ----------------
+local TabShop = UI:Tab("SHOP")
+local SS = TabShop:Section("AUTO BUY FOOD")
+SS:Toggle({ Name = "Auto Buy Food", Desc = "ซื้ออาหารให้เองเมื่อเงินพอ", Default = false,
+    Callback = function(v) Hub.Flags.AutoFood = v end })
+SS:Dropdown({ Name = "โหมดซื้ออาหาร", Options = { "แพงสุดที่ไหว", "ถูกสุดที่ไหว" }, Default = "แพงสุดที่ไหว",
+    Callback = function(v) Hub.Opts.FoodMode = v end })
+SS:Toggle({ Name = "Equip อาหารที่ซื้อ", Default = true,
+    Callback = function(v) Hub.Opts.AutoEquipFood = v end })
+
+local SB = TabShop:Section("AUTO UPGRADE BAR")
+SB:Toggle({ Name = "Auto Buy Bar", Desc = "อัพบาร์ตัวถัดไปเมื่อเงินพอ", Default = false,
+    Callback = function(v) Hub.Flags.AutoBar = v end })
+
+local SP = TabShop:Section("AUTO UPGRADE PLOT")
+SP:Toggle({ Name = "Auto Upgrade Plot", Desc = "อัพ Plot (เพิ่มช่องสัตว์) เมื่อเงินพอ", Default = false,
+    Callback = function(v) Hub.Flags.AutoPlot = v end })
+
+local SG = TabShop:Section("ตั้งค่า")
+SG:Slider({ Name = "เก็บเงินสำรองไว้", Min = 0, Max = 1000000000000, Step = 1000000000, Default = 0, Suffix = "",
+    Callback = function(v) Hub.Opts.Reserve = v end })
+SG:Slider({ Name = "เช็กทุกกี่วิ", Min = 0.5, Max = 10, Step = 0.5, Default = 1.5, Suffix = "s",
+    Callback = function(v) Hub.Opts.ShopDelay = v end })
+SG:Button({ Name = "ดูสถานะร้านค้า", Callback = function()
+    local d = data()
+    local nx = StandsConf and d and StandsConf.All[tonumber(d.Stand) + 1]
+    local nu = FenceConfig and d and FenceConfig.Upgrades[tonumber(d.FenceLevel) + 1]
+    UI:Notify({ Title = "Shop", Duration = 8, Text = string.format(
+        "เงิน: %s\nบาร์: %s (ต่อไป %s)\nPlot Lv %s (ต่อไป %s)\nอาหาร: %s\nล่าสุด: %s",
+        fmtMoney(money()), tostring(d and d.Stand), nx and fmtMoney(nx.Price) or "MAX",
+        tostring(d and d.FenceLevel), nu and fmtMoney(nu.Price) or "MAX",
+        tostring(d and d.EquippedFood), tostring(Hub.Stats.ShopLast)) })
+end })
+
+-- ---------------- SELL ----------------
+local TabSell = UI:Tab("SELL")
+local SSell = TabSell:Section("AUTO SELL")
+SSell:Toggle({ Name = "Auto Sell", Desc = "ขายสัตว์ในกระเป๋าตามเงื่อนไขด้านล่างให้เอง", Default = false,
+    Callback = function(v) Hub.Flags.AutoSell = v end })
+SSell:Dropdown({ Name = "โหมดขาย", Options = { "ขายทั้งหมด", "จำกัด Rarity" }, Default = "จำกัด Rarity",
+    Callback = function(v) Hub.Opts.SellMode = v end })
+SSell:Dropdown({ Name = "ขาย Rarity ถึงระดับ", Options = RARITY_ORDER, Default = "Rare",
+    Callback = function(v) Hub.Opts.SellRarity = v end })
+SSell:Toggle({ Name = "รวมสัตว์ที่วางบน Plot", Desc = "ปิดไว้ = ไม่ขายตัวที่กำลังทำเงินอยู่", Default = false,
+    Callback = function(v) Hub.Opts.SellPlaced = v end })
+SSell:Slider({ Name = "ตรวจทุกกี่วิ", Min = 1, Max = 30, Step = 1, Default = 3, Suffix = "s",
+    Callback = function(v) Hub.Opts.SellEvery = v end })
+SSell:Slider({ Name = "หน่วงต่อตัว", Min = 0.05, Max = 1, Step = 0.05, Default = 0.15, Suffix = "s",
+    Callback = function(v) Hub.Opts.SellStep = v end })
+SSell:Button({ Name = "ขายตามเงื่อนไขเดี๋ยวนี้", Callback = function()
+    task.spawn(function() sellBatch(true) end)
+end })
+SSell:Label("โหมด 'จำกัด Rarity' = ขายเฉพาะสัตว์ Rarity ตั้งแต่ระดับที่เลือก 'ลงมา' เท่านั้น")
+
+-- ---------------- MISC ----------------
+local TabMisc = UI:Tab("MISC")
+
+local SM1 = TabMisc:Section("PLAYER (ความเร็ว / กระโดด)")
+SM1:Toggle({ Name = "WalkSpeed", Desc = "เปิดเพื่อบังคับความเร็ววิ่งตามสไลเดอร์", Default = false,
+    Callback = function(v)
+        Hub.Flags.Speed = v
+        applyWalk(v)
+    end })
+SM1:Slider({ Name = "ความเร็ววิ่ง", Min = 16, Max = 500, Step = 1, Default = 16, Suffix = "",
+    Callback = function(v)
+        Hub.Opts.WalkSpeed = v
+        if Hub.Flags.Speed then applyWalk(true) end
+    end })
+SM1:Toggle({ Name = "JumpPower (กระโดดสูง)", Desc = "เปิดเพื่อบังคับความสูงกระโดด", Default = false,
+    Callback = function(v)
+        Hub.Flags.Jump = v
+        applyJump(v)
+    end })
+SM1:Slider({ Name = "ความสูงกระโดด", Min = 50, Max = 500, Step = 1, Default = 50, Suffix = "",
+    Callback = function(v)
+        Hub.Opts.JumpPower = v
+        if Hub.Flags.Jump then applyJump(true) end
+    end })
+SM1:Slider({ Name = "FOV (มองกว้าง)", Min = 70, Max = 120, Step = 1, Default = 70, Suffix = "",
+    Callback = function(v)
+        Hub.Opts.Fov = v
+        local cam = workspace.CurrentCamera
+        if cam then cam.FieldOfView = v end
+    end })
+SM1:Button({ Name = "รีเซ็ตค่าปกติ", Desc = "วิ่ง 16 / กระโดด 50 / FOV 70", Callback = function()
+    Hub.Flags.Speed = false
+    Hub.Flags.Jump = false
+    applyWalk(false)
+    applyJump(false)
+    local cam = workspace.CurrentCamera
+    if cam then cam.FieldOfView = 70 end
+    Hub.Opts.WalkSpeed = 16
+    Hub.Opts.JumpPower = 50
+    Hub.Opts.Fov = 70
+    UI:Notify({ Title = "MISC", Text = "รีเซ็ตค่าตัวละครเป็นปกติแล้ว", Duration = 3 })
+end })
+
+local SM2 = TabMisc:Section("FPS / กราฟิก")
+SM2:Toggle({ Name = "Boost FPS", Desc = "ปิด Particle/เทรล/แสง + ลดคุณภาพกราฟิกให้ต่ำสุด", Default = false,
+    Callback = function(v)
+        Hub.Flags.FpsBoost = v
+        task.spawn(function()
+            applyFpsBoost(v)
+            UI:Notify({ Title = "Boost FPS", Text = v and "เปิดแล้ว" or "ปิดแล้ว", Duration = 3 })
+        end)
+    end })
+SM2:Toggle({ Name = "Remove Fog", Desc = "ลบหมอก/Atmosphere ทั้งหมด", Default = false,
+    Callback = function(v)
+        Hub.Flags.Fog = v
+        applyFog(v)
+    end })
+SM2:Toggle({ Name = "Fullbright", Desc = "สว่างทั้งแมพ มองเห็นชัด", Default = false,
+    Callback = function(v)
+        Hub.Flags.Fullbright = v
+        applyFullbright(v)
+    end })
+
+local SM3 = TabMisc:Section("อื่นๆ")
+SM3:Toggle({ Name = "Anti AFK", Desc = "กันหลุดจากการไม่ขยับ", Default = true,
+    Callback = function(v) Hub.Flags.AntiAfk = v end })
+SM3:Button({ Name = "ตรวจค่า MISC ปัจจุบัน", Callback = function()
+    local hum = getHum()
+    local cam = workspace.CurrentCamera
+    UI:Notify({ Title = "MISC", Duration = 8, Text = string.format(
+        "WalkSpeed: %s (โหมด: %s)\nJumpPower: %s (โหมด: %s)\nFOV: %s\nBoost FPS: %s | Fog: %s | Fullbright: %s\nล่าสุด: %s",
+        tostring(hum and math.floor(hum.WalkSpeed)), tostring(Hub.Flags.Speed),
+        tostring(hum and math.floor(hum.JumpPower)), tostring(Hub.Flags.Jump),
+        tostring(cam and math.floor(cam.FieldOfView)),
+        tostring(Hub.Flags.FpsBoost), tostring(Hub.Flags.Fog), tostring(Hub.Flags.Fullbright),
+        tostring(Hub.Stats.MiscLast or "-")) })
+end })
+
+-- ---------------- loops ----------------
+
+-- CYCLE loop : โยน N ครั้ง -> เทรน M วิ
+task.spawn(function()
+    while Hub.Running do
+        if Hub.Flags.Cycle then
+            pcall(function()
+                local O = Hub.Opts
+                local need = math.max(1, math.floor(O.CycleThrows or 5))
+                if Hub.CyclePhase == "Throw" then
+                    Hub.Flags.AutoTrain = false
+                    if Hub.CycleThrown >= need then
+                        Hub.Flags.AutoThrow = false
+                        Hub.CyclePhase = "Train"
+                        Hub.CycleTrainEnd = os.clock() + math.max(5, math.floor(O.CycleTrainSecs or 30))
+                        Hub.Stats.CycleLast = string.format("โยนครบ %d -> ไปเทรน %d วิ", need, O.CycleTrainSecs)
+                        if UI then UI:Notify({ Title = "Cycle", Text = string.format("โยนครบ %d ครั้ง → เทรน %d วิ", need, O.CycleTrainSecs), Duration = 4 }) end
+                    else
+                        Hub.Flags.AutoThrow = true
+                    end
+                else
+                    Hub.Flags.AutoThrow = false
+                    Hub.Flags.AutoTrain = true
+                    if os.clock() >= (Hub.CycleTrainEnd or 0) then
+                        Hub.Flags.AutoTrain = false
+                        Hub.InTrain = false
+                        pcall(function() Remotes.Invoke("Training_Stop") end)
+                        Hub.CyclePhase = "Throw"
+                        Hub.CycleThrown = 0
+                        Hub.CycleDone = Hub.CycleDone + 1
+                        local rounds = math.floor(O.CycleRounds or 0)
+                        Hub.Stats.CycleLast = string.format("รอบที่ %d เสร็จ -> กลับไปโยน", Hub.CycleDone)
+                        if UI then UI:Notify({ Title = "Cycle", Text = string.format("เทรนครบ %d วิ → กลับไปโยน %d ครั้ง (รอบที่ %d)", O.CycleTrainSecs, need, Hub.CycleDone), Duration = 4 }) end
+                        if rounds > 0 and Hub.CycleDone >= rounds then
+                            Hub.Flags.Cycle = false
+                            Hub.Flags.AutoThrow = false
+                            Hub.Stats.CycleLast = string.format("จบครบ %d รอบ", Hub.CycleDone)
+                            if UI then UI:Notify({ Title = "Cycle เสร็จ", Text = string.format("ทำครบ %d รอบแล้ว หยุดอัตโนมัติ", Hub.CycleDone), Duration = 8 }) end
+                        end
+                    end
+                end
+                if UI and UI.SetStatus then
+                    local s
+                    if Hub.CyclePhase == "Throw" then
+                        s = string.format("Cycle โยน %d/%d (รอบที่ %d)", Hub.CycleThrown, need, Hub.CycleDone + 1)
+                    else
+                        s = string.format("Cycle เทรน เหลือ %d วิ (รอบที่ %d)", math.max(0, math.floor((Hub.CycleTrainEnd or 0) - os.clock())), Hub.CycleDone + 1)
+                    end
+                    pcall(function() UI:SetStatus(s) end)
+                end
+            end)
+        end
+        task.wait(0.4)
+    end
+end)
+
+task.spawn(function()
+    while Hub.Running do
+        if Hub.Flags.AutoTrain then
+            pcall(function()
+                local hrp = getHRP()
+                if not hrp then
+                    Hub.InTrain = false
+                else
+                    local s = getSpot()
+                    local pos = s and s.Position or Hub.TrainPos
+                    if not Hub.InTrain then
+                        if (hrp.Position - pos).Magnitude > (Hub.Opts.DriftRadius or 8) then
+                            warp(pos)
+                            task.wait(0.3)
+                        end
+                        if os.clock() - (Hub.LastTry or 0) > 1.5 then
+                            Hub.LastTry = os.clock()
+                            local ok, r = pcall(function() return Remotes.Invoke("Training_Start") end)
+                            if ok and type(r) == "table" then
+                                if r.Ok or r.Reason == "Busy" then
+                                    Hub.InTrain = true
+                                    Hub.TrainAt = os.clock()
+                                    Hub.Stats.TrainLast = r.Ok and "training started" or "training running"
+                                elseif r.Reason == "Throwing" then
+                                    pcall(function() Remotes.Invoke("Throw_Cancel") end)
+                                    Hub.Stats.TrainLast = "cancel throw..."
+                                else
+                                    Hub.Stats.TrainLast = "start: " .. tostring(r.Reason)
+                                end
+                            end
+                        end
+                    else
+                        if (hrp.Position - pos).Magnitude > (Hub.Opts.DriftRadius or 8) * 3 then
+                            Hub.InTrain = false
+                        elseif os.clock() - Hub.TrainAt > 25 then
+                            Hub.InTrain = false
+                        end
+                    end
+                end
+            end)
+        end
+        task.wait(0.4)
+    end
+end)
+
+task.spawn(function()
+    while Hub.Running do
+        if Hub.Flags.AutoThrow and ThrowCtrl and not Hub.InTrain then
+            pcall(function()
+                local hrp = getHRP()
+                if hrp and (hrp.Position - Hub.LaunchPos).Magnitude > 20 then
+                    warp(Hub.LaunchPos)
+                    task.wait(0.35)
+                end
+                if not Hub.Throwing then
+                    Hub.Throwing = true
+                    pcall(function() ThrowCtrl.Start() end)
+                    Hub.Throwing = false
+                end
+            end)
+        end
+        task.wait(Hub.Flags.AutoThrow and (Hub.Opts.ThrowDelay or 2) or 0.4)
+    end
+end)
+
+task.spawn(function()
+    while Hub.Running do
+        if Hub.Flags.AutoEquip then
+            pcall(function()
+                Hub.Stats.EquipLast = equipBest()
+                Hub.Stats.Equips = Hub.Stats.Equips + 1
+            end)
+        end
+        task.wait(Hub.Flags.AutoEquip and (Hub.Opts.EquipDelay or 5) or 1)
+    end
+end)
+
+task.spawn(function()
+    while Hub.Running do
+        if Hub.Flags.AutoFood and FoodsConfig and type(FoodsConfig.List) == "table" then
+            pcall(function()
+                local m = money()
+                local reserve = Hub.Opts.Reserve or 0
+                local best = nil
+                for _, f in ipairs(FoodsConfig.List) do
+                    local p = tonumber(f.Price) or 0
+                    if Balance and Balance.GetItemPrice then
+                        local ok, v = pcall(Balance.GetItemPrice, LP, f)
+                        if ok and tonumber(v) then p = tonumber(v) end
+                    end
+                    if m - reserve >= p then
+                        if Hub.Opts.FoodMode == "ถูกสุดที่ไหว" then
+                            if not best or p < best.Price then best = { Food = f, Price = p } end
+                        else
+                            if not best or p > best.Price then best = { Food = f, Price = p } end
+                        end
+                    end
+                end
+                if best then
+                    local ok, r = pcall(function() return Remotes.Invoke("Shop_Buy", best.Food.Index) end)
+                    if ok and type(r) == "table" and r.Ok then
+                        Hub.Stats.Food = Hub.Stats.Food + 1
+                        Hub.Stats.ShopLast = "ซื้ออาหาร " .. tostring(best.Food.Name) .. " (" .. fmtMoney(best.Price) .. ")"
+                        if Hub.Opts.AutoEquipFood then
+                            pcall(function() Remotes.Invoke("Shop_Equip", best.Food.Index) end)
+                        end
+                    else
+                        Hub.Stats.ShopLast = "ซื้ออาหารไม่สำเร็จ: " .. enc(r)
+                    end
+                end
+            end)
+        end
+        if Hub.Flags.AutoBar then
+            pcall(function()
+                local d = data()
+                local cur = (d and tonumber(d.Stand)) or 1
+                local nx = StandsConf and StandsConf.All[cur + 1]
+                if nx and money() - (Hub.Opts.Reserve or 0) >= (tonumber(nx.Price) or math.huge) then
+                    local ok, r = pcall(function() return Remotes.Invoke("Stand_Upgrade") end)
+                    if ok and type(r) == "table" and r.Ok then
+                        Hub.Stats.Bar = Hub.Stats.Bar + 1
+                        Hub.Stats.ShopLast = "อัพบาร์ -> " .. tostring(nx.Name)
+                    end
+                end
+            end)
+        end
+        if Hub.Flags.AutoPlot then
+            pcall(function()
+                local d = data()
+                local cur = (d and tonumber(d.FenceLevel)) or 0
+                local nu = FenceConfig and FenceConfig.Upgrades[cur + 1]
+                if nu and money() - (Hub.Opts.Reserve or 0) >= (tonumber(nu.Price) or math.huge) then
+                    local ok, r = pcall(function() return Remotes.Invoke("Plot_UpgradeFence") end)
+                    if ok and type(r) == "table" and r.Ok then
+                        Hub.Stats.Plot = Hub.Stats.Plot + 1
+                        Hub.Stats.ShopLast = "อัพ Plot -> " .. tostring(nu.Slots) .. " ช่อง"
+                    end
+                end
+            end)
+        end
+        task.wait(Hub.Opts.ShopDelay or 1.5)
+    end
+end)
+
+task.spawn(function()
+    while Hub.Running do
+        if Hub.Flags.AutoSell then pcall(function() sellBatch(false) end) end
+        task.wait(Hub.Flags.AutoSell and (Hub.Opts.SellEvery or 3) or 1)
+    end
+end)
+
+-- MISC loop
+task.spawn(function()
+    while Hub.Running do
+        pcall(function()
+            local hum = getHum()
+            if hum then
+                if Hub.Flags.Speed and math.abs(hum.WalkSpeed - Hub.Opts.WalkSpeed) > 0.5 then
+                    hum.WalkSpeed = Hub.Opts.WalkSpeed
+                end
+                if Hub.Flags.Jump then
+                    if not hum.UseJumpPower then pcall(function() hum.UseJumpPower = true end) end
+                    if math.abs(hum.JumpPower - Hub.Opts.JumpPower) > 0.5 then
+                        hum.JumpPower = Hub.Opts.JumpPower
+                    end
+                end
+            end
+            if Hub.Flags.Fog and Lighting.FogEnd < 900000 then applyFog(true) end
+            if Hub.Flags.Fullbright and (Lighting.Brightness < 2 or Lighting.GlobalShadows) then applyFullbright(true) end
+            if Hub.Flags.Fov then
+                local cam = workspace.CurrentCamera
+                if cam and math.abs(cam.FieldOfView - Hub.Opts.Fov) > 0.5 then cam.FieldOfView = Hub.Opts.Fov end
+            end
+        end)
+        task.wait(1)
+    end
+end)
+
+-- Anti AFK
+do
+    local conn = LP.Idled:Connect(function()
+        if not Hub.Flags.AntiAfk then return end
+        local vu = game:GetService("VirtualUser")
+        vu:CaptureController()
+        vu:ClickButton2(Vector2.new())
+    end)
+    table.insert(Hub.Conns, conn)
+end
+
+syncKnown()
+UI:AddSettingsTab()
+UI:Notify({ Title = "2K Hub", Text = "FARM: Auto Throw + Cycle | TRAIN / SHOP / SELL / MISC", Duration = 6 })
+UI:Toggle(true)
